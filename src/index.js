@@ -1,4 +1,4 @@
-// 【美股專屬】實戰交易決策與量化資料庫寫入機器人
+// 【美股專屬】實戰交易決策與量化資料庫寫入機器人=======
 async function generateTradingReport(env) {
   try {
     const isUS = true; // 🌟 切換為美股

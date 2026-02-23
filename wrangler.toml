@@ -1,0 +1,13 @@
+name = "us-stock-bot" # 您的 Worker 名稱
+main = "src/index.js"
+compatibility_date = "2024-02-23"
+
+# 設定定時排程 (每天台灣時間下午 3 點 = UTC 早上 7 點)
+[triggers]
+crons = ["0 7 * * 1-5"]
+
+# 綁定 D1 資料庫 (請填入您在 Cloudflare 後台看到的 ID)
+[[d1_databases]]
+binding = "DB"
+database_name = "trading_db" 
+database_id = "e03241f2-4264-4346-91c0-47bbea0bacf9"

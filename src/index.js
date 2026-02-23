@@ -232,14 +232,24 @@ async function sendToTelegram(message, env) {
 export default {
   // 網頁手動觸發測試
   async fetch(request, env, ctx) {
-    const report = await generateTradingReport(env);
-    ctx.waitUntil(sendToTelegram(report, env));
-    return new Response("✅ 執行完畢，請至 Telegram 查看結果！\n\n" + report, { 
-      headers: { "Content-Type": "text/plain;charset=UTF-8" } 
-    });
+    // 🌟 關鍵修改：將耗時的「生成報告 + 傳送 TG + 寫入資料庫」全部打包丟到背景執行
+    ctx.waitUntil((async () => {
+      try {
+        const report = await generateTradingReport(env);
+        await sendToTelegram(report, env);
+      } catch (err) {
+        console.error("背景執行失敗:", err);
+      }
+    })());
+
+    // 網頁不再等待 AI 慢慢寫報告，而是「一秒內」直接回覆您，絕對不會再超時斷線！
+    return new Response(
+      "✅ 系統已收到指令！\n\n機器人正在背景努力上網搜尋美股新聞並生成深度報告。\n預計需耗時 10~20 秒，完成後會自動推播至您的 Telegram 並寫入資料庫，請稍候並留意手機通知！", 
+      { headers: { "Content-Type": "text/plain;charset=UTF-8" } }
+    );
   },
 
-  // 定時排程觸發 (Cron Triggers)
+  // 定時排程觸發 (Cron Triggers) - 這邊維持不變
   async scheduled(event, env, ctx) {
     const report = await generateTradingReport(env);
     await sendToTelegram(report, env);

@@ -1,3 +1,5 @@
+// 核心設定：直接定義正確的模型名稱，避開「2.5」這種不存在的型號
+const MODEL_NAME = "gemini-1.5-flash"; // 或是改用 "gemini-2.0-flash"
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 export default {
@@ -6,16 +8,12 @@ export default {
 
   async runTask(env) {
     try {
-      const stockList = ["TSM", "NVDA", "AAPL"]; // 測試用
+      const stockList = ["TSM", "NVDA", "AAPL"];
       let report = "🚀 **美股 AI 分析報告**\n\n";
 
-      // 1. 確保金鑰乾淨
-      const apiKey = String(env.GEMINI_API_KEY || "").trim();
-
       for (const symbol of stockList) {
-        // 2. 使用最一般的 v1beta 標準網址
-        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
-    
+        // 標準 API 網址，確保路徑與型號名稱正確
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${env.GEMINI_API_KEY.trim()}`;
 
         const res = await fetch(url, {
           method: 'POST',
@@ -31,14 +29,13 @@ export default {
           const analysis = data.candidates[0].content.parts[0].text;
           report += `📈 **${symbol}**\n${analysis.trim()}\n\n`;
         } else {
-          // 如果還是失敗，讓訊息直接告訴我們 Google 說了什麼
-          const errorMsg = data.error ? data.error.message : "未知錯誤";
-          report += `❌ **${symbol}** 分析失敗 (${errorMsg})\n\n`;
+          // 這裡會抓出真正的 Google 錯誤原因
+          report += `❌ **${symbol}** 錯誤: ${data.error ? data.error.message : "連線失敗"}\n\n`;
         }
         await sleep(2000); 
       }
 
-      // 3. 發送至 Telegram (這部分你已經通了，照舊即可)
+      // 發送至 Telegram
       await fetch(`https://api.telegram.org/bot${env.TG_BOT_TOKEN}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -51,7 +48,7 @@ export default {
 
       return new Response("OK");
     } catch (error) {
-      return new Response("系統崩潰: " + error.message);
+      return new Response("崩潰: " + error.message);
     }
   }
 };

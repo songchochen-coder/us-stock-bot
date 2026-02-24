@@ -110,40 +110,53 @@ async processAllPending(env, today) {
     return successCount;
   },
   // --- 模組 C: AI 核心 (修正為 v1 端點) ---
-  async analyzeWithGemini(env, stock) {
-    // 關鍵修正：使用 v1 穩定版 URL
-    const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
-    
-    const prompt = `你是一位專業分析師。請分析股票 ${stock.ticker}。股價:${stock.close_price}。
-    搜尋近期利多原因。嚴格回傳純 JSON 格式：
-    {"sector": "板塊", "catalyst": "原因", "stage": "2", "heat": 5, "strategy": "標籤"}`;
+async analyzeWithGemini(env, stock) {
+  const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash-latest:generateContent?key=${env.GEMINI_API_KEY}`;
 
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { 
-          temperature: 0.1,
-          response_mime_type: "application/json" 
-        }
-      })
-    });
+  const prompt = `
+你是一位專業分析師。
+請分析股票 ${stock.ticker}，股價 ${stock.close_price}。
+只回傳純 JSON：
 
-    if (!response.ok) {
-      const err = await response.text();
-      throw new Error(`Gemini API 404/錯誤: ${err}`);
-    }
+{
+  "sector": "",
+  "catalyst": "",
+  "stage": "2",
+  "heat": 5,
+  "strategy": ""
+}
+`;
 
-    const data = await response.json();
-    const rawText = data.candidates[0].content.parts[0].text;
-    
-    // 用正規表達式強制提取 JSON 物件
-    const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("回傳非 JSON 格式");
-    
-    return JSON.parse(jsonMatch[0]);
-  },
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.1 }
+    })
+  });
+
+  if (!response.ok) {
+    const err = await response.text();
+    console.error("Gemini 狀態碼:", response.status);
+    console.error("Gemini 錯誤:", err);
+    throw new Error("Gemini API 失敗");
+  }
+
+  const data = await response.json();
+
+  if (!data.candidates || data.candidates.length === 0) {
+    throw new Error("無 candidates");
+  }
+
+  const rawText = data.candidates[0]?.content?.parts?.[0]?.text;
+  if (!rawText) throw new Error("無 text");
+
+  const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error("回傳非 JSON");
+
+  return JSON.parse(jsonMatch[0]);
+}
 
 async sendFinalReport(env, today) {
     // 💡 關鍵修正：改抓所有當前已分析成功 (is_analyzed = 1) 的標的，不綁死日期

@@ -78,7 +78,7 @@ export default {
   },
 
 async processAllPending(env, today) {
-    // 修正：拿掉 scan_date = ? 的限制，直接抓所有待處理(0)的資料
+    // 💡 關鍵修正：移除 scan_date 限制，直接抓所有狀態為 0 的資料
     const { results } = await env.DB.prepare(
       "SELECT id, ticker, company_name, close_price, sma_20, sma_50 FROM RawScans WHERE is_analyzed = 0 LIMIT 15"
     ).all();
@@ -95,12 +95,15 @@ async processAllPending(env, today) {
           VALUES (?, ?, ?, ?, ?, ?, ?)
         `).bind(stock.id, stock.ticker, aiResult.sector, aiResult.catalyst, aiResult.stage, aiResult.heat, aiResult.strategy).run();
 
+        // 分析成功，標記為 1
         await env.DB.prepare("UPDATE RawScans SET is_analyzed = 1 WHERE id = ?").bind(stock.id).run();
         successCount++;
         
+        // 延遲以避免 API 限流
         await new Promise(r => setTimeout(r, 1200)); 
       } catch (e) {
         console.error(`分析 ${stock.ticker} 失敗:`, e.message);
+        // 失敗標記為 -1
         await env.DB.prepare("UPDATE RawScans SET is_analyzed = -1 WHERE id = ?").bind(stock.id).run();
       }
     }
@@ -143,11 +146,12 @@ async processAllPending(env, today) {
   },
 
 async sendFinalReport(env, today) {
-    // 修正：抓取今天分析成功的所有標的
+    // 💡 關鍵修正：改抓所有當前已分析成功 (is_analyzed = 1) 的標的，不綁死日期
     const { results } = await env.DB.prepare(`
       SELECT * FROM AIAnalysis 
-      WHERE scan_id IN (SELECT id FROM RawScans WHERE is_analyzed = 1 AND scan_date = ?)
-    `).bind(today).all();
+      WHERE scan_id IN (SELECT id FROM RawScans WHERE is_analyzed = 1)
+      ORDER BY heat DESC
+    `).all();
 
     if (!results || results.length === 0) return "資料庫中無已分析標的可發送。";
 
@@ -162,6 +166,11 @@ async sendFinalReport(env, today) {
       body: JSON.stringify({ chat_id: env.TG_CHAT_ID, text: msg })
     });
 
-    return tgRes.ok ? "Telegram 發送完成" : "Telegram 發送失敗";
+    // 💡 發送後可選擇是否將 is_analyzed 改成 2 (代表已回報)，避免下次重複發送
+    if (tgRes.ok) {
+      await env.DB.prepare("UPDATE RawScans SET is_analyzed = 2 WHERE is_analyzed = 1").run();
+      return "Telegram 發送完成";
+    }
+    return "Telegram 發送失敗";
   }
 };

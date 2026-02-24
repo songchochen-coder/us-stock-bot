@@ -11,3 +11,8 @@ crons = ["0 7 * * 1-5"]
 binding = "DB"
 database_name = "trading_db" 
 database_id = "e03241f2-4264-4346-91c0-47bbea0bacf9"
+
+[observability]
+[observability.logs]
+enabled = false
+invocation_logs = true

@@ -14,7 +14,8 @@ export default {
 
       for (const symbol of stockList) {
         // 2. 使用最一般的 v1beta 標準網址
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
+    
 
         const res = await fetch(url, {
           method: 'POST',

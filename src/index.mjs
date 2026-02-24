@@ -77,14 +77,15 @@ export default {
     return stocks.length;
   },
 
-  // --- 模組 B: Processor (AI 分析迴圈) ---
-  async processAllPending(env, today) {
-    // 修正點：抓取今日且尚未分析 (is_analyzed = 0) 的資料
+async processAllPending(env, today) {
+    // 修正：拿掉 scan_date = ? 的限制，直接抓所有待處理(0)的資料
     const { results } = await env.DB.prepare(
-      "SELECT id, ticker, company_name, close_price, sma_20, sma_50 FROM RawScans WHERE scan_date = ? AND is_analyzed = 0"
-    ).bind(today).all();
+      "SELECT id, ticker, company_name, close_price, sma_20, sma_50 FROM RawScans WHERE is_analyzed = 0 LIMIT 15"
+    ).all();
 
     let successCount = 0;
+    if (!results || results.length === 0) return 0;
+
     for (const stock of results) {
       try {
         const aiResult = await this.analyzeWithGemini(env, stock);
@@ -94,20 +95,17 @@ export default {
           VALUES (?, ?, ?, ?, ?, ?, ?)
         `).bind(stock.id, stock.ticker, aiResult.sector, aiResult.catalyst, aiResult.stage, aiResult.heat, aiResult.strategy).run();
 
-        // 標記為成功 (1)
         await env.DB.prepare("UPDATE RawScans SET is_analyzed = 1 WHERE id = ?").bind(stock.id).run();
         successCount++;
         
         await new Promise(r => setTimeout(r, 1200)); 
       } catch (e) {
         console.error(`分析 ${stock.ticker} 失敗:`, e.message);
-        // 標記為失敗 (-1)，避免下次重複崩潰
         await env.DB.prepare("UPDATE RawScans SET is_analyzed = -1 WHERE id = ?").bind(stock.id).run();
       }
     }
     return successCount;
   },
-
   // --- 模組 C: AI 核心 (修正為 v1 端點) ---
   async analyzeWithGemini(env, stock) {
     // 關鍵修正：使用 v1 穩定版 URL
@@ -144,20 +142,18 @@ export default {
     return JSON.parse(jsonMatch[0]);
   },
 
-  // --- 模組 D: Reporter (發送報告) ---
-  async sendFinalReport(env, today) {
+async sendFinalReport(env, today) {
+    // 修正：抓取今天分析成功的所有標的
     const { results } = await env.DB.prepare(`
       SELECT * FROM AIAnalysis 
-      WHERE scan_id IN (SELECT id FROM RawScans WHERE scan_date = ?)
+      WHERE scan_id IN (SELECT id FROM RawScans WHERE is_analyzed = 1 AND scan_date = ?)
     `).bind(today).all();
 
-    if (results.length === 0) return "資料庫中無已分析標的可發送。";
+    if (!results || results.length === 0) return "資料庫中無已分析標的可發送。";
 
     let msg = `🔥【美股實戰戰報】${today}\n\n`;
     results.forEach(p => {
-      msg += `📂 ${p.sector} | **${p.ticker}**\n`;
-      msg += `* 🌡️ 熱度: ${p.heat}🔥 | ${p.strategy_tag}\n`;
-      msg += `* 📰 ${p.catalyst}\n\n`;
+      msg += `📂 ${p.sector} | **${p.ticker}**\n* 🌡️ 熱度: ${p.heat}🔥 | ${p.strategy_tag}\n* 📰 ${p.catalyst}\n\n`;
     });
 
     const tgRes = await fetch(`https://api.telegram.org/bot${env.TG_BOT_TOKEN}/sendMessage`, {

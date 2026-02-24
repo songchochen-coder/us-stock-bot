@@ -1,5 +1,5 @@
 name = "us-stock-bot" # 您的 Worker 名稱
-main = "src/index.js"
+main = "src/index.mjs"
 compatibility_date = "2024-02-23"
 
 # 設定定時排程 (每天台灣時間下午 3 點 = UTC 早上 7 點)

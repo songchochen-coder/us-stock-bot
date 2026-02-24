@@ -68,7 +68,7 @@ async function generateTradingReport(env) {
 
     // 限制分析數量，避免超時與 Rate Limit
     const totalFound = stocks.length;
-    const processLimit = 12; 
+    const processLimit = 3; 
     stocks = stocks.slice(0, processLimit); 
 
     let rawStockData = {};
@@ -123,7 +123,7 @@ async function generateTradingReport(env) {
       }
 
       // 暫停 4 秒，避免 Gemini API 限速
-      await sleep(4000); 
+      await sleep(2000); 
     }
 
     if (analyzedStocks.length === 0) return "⚠️ 所有股票單檔分析皆失敗，請檢查 API 額度。";

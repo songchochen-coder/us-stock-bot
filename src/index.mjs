@@ -1,51 +1,37 @@
-/**
- * 美股量化分析機器人 - 最終穩定版
- * 功能：TradingView 掃描 + D1 數據持久化 + Gemini v1 逐檔分析 + Telegram 彙整報告
- */
-
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const action = url.searchParams.get("action");
-
-    // 1. 設定台灣日期 (避免 UTC 換日偏差)
     const today = new Date(new Date().getTime() + 8 * 3600 * 1000).toISOString().split('T')[0];
 
     if (action === "run") {
-      let debugLog = `📅 執行日期標記: ${today}\n`;
-      
+      let debugLog = `📅 標記日期: ${today}\n`;
       try {
-        // --- 階段一：TradingView 掃描入庫 ---
-        debugLog += "⏳ 正在從 TradingView 抓取資料...";
+        // 1. 抓取資料
         const count = await this.ingestStocks(env, today);
-        debugLog += ` ✅ 成功！入庫 ${count} 檔\n`;
-        
-        if (count === 0) return new Response(debugLog + "⚠️ 今日無符合條件之標的，任務終止。");
+        debugLog += `✅ 成功入庫: ${count} 檔\n`;
 
-        // --- 階段二：逐檔進行 AI 分析 ---
-        debugLog += "⏳ 正在啟動 AI 逐檔分析 (v1 穩定版模式)...\n";
+        // 2. 核心診斷：分析前先查一次數量
+        const check = await env.DB.prepare("SELECT COUNT(*) as c FROM RawScans WHERE is_analyzed = 0").first();
+        debugLog += `🔍 診斷：目前資料庫中共有 ${check.c} 檔待分析標的\n`;
+
+        // 3. 執行分析
+        debugLog += "⏳ 正在啟動 AI 逐檔分析...\n";
         const analysisCount = await this.processAllPending(env, today);
-        debugLog += ` ✅ 分析完成：共完成 ${analysisCount} 檔標的\n`;
+        debugLog += `✅ 分析完成：共完成 ${analysisCount} 檔\n`;
 
-        // --- 階段三：SQL 彙整與 Telegram 推播 ---
-        debugLog += "⏳ 正在產生 SQL 統計報告並發送 Telegram...";
+        // 4. 發送報告
         const reportStatus = await this.sendFinalReport(env, today);
-        debugLog += ` ✅ ${reportStatus}\n`;
+        debugLog += `🚀 ${reportStatus}\n`;
 
-        return new Response(`🔥 任務執行成功！詳細日誌如下：\n\n${debugLog}`, {
-          headers: { "Content-Type": "text/plain; charset=UTF-8" }
-        });
-
+        return new Response(debugLog, { headers: { "Content-Type": "text/plain; charset=UTF-8" } });
       } catch (err) {
-        const errorMsg = `❌ 執行崩潰：\n${err.message}`;
-        return new Response(errorMsg, { status: 500 });
+        return new Response(`❌ 崩潰：${err.message}\n${err.stack}`);
       }
     }
-
-    return new Response("請使用 ?action=run 啟動機器人");
+    return new Response("使用 ?action=run 啟動");
   },
 
-  // --- 模組 A: Ingester (掃描器) ---
   async ingestStocks(env, today) {
     const tvUrl = "https://scanner.tradingview.com/america/scan";
     const tvPayload = {
@@ -66,7 +52,6 @@ export default {
     const stocks = tvData.data || [];
 
     if (stocks.length > 0) {
-      // 使用 INSERT OR IGNORE 避免重複入庫
       const stmt = env.DB.prepare(`
         INSERT OR IGNORE INTO RawScans (scan_date, ticker, company_name, close_price, sma_20, sma_50, sma_200, is_analyzed)
         VALUES (?, ?, ?, ?, ?, ?, ?, 0)
@@ -77,16 +62,13 @@ export default {
     return stocks.length;
   },
 
-async processAllPending(env, today) {
-    // 💡 關鍵修正：移除 scan_date 限制，直接抓所有狀態為 0 的資料
-    const { results } = await env.DB.prepare(
-      "SELECT id, ticker, company_name, close_price, sma_20, sma_50 FROM RawScans WHERE is_analyzed = 0 LIMIT 15"
-    ).all();
-
+  async processAllPending(env, today) {
+    // 💡 修正 1：移除解構，確保抓到資料
+    const query = await env.DB.prepare("SELECT * FROM RawScans WHERE is_analyzed = 0").all();
+    const stocksToAnalyze = query.results || [];
+    
     let successCount = 0;
-    if (!results || results.length === 0) return 0;
-
-    for (const stock of results) {
+    for (const stock of stocksToAnalyze) {
       try {
         const aiResult = await this.analyzeWithGemini(env, stock);
         
@@ -95,95 +77,59 @@ async processAllPending(env, today) {
           VALUES (?, ?, ?, ?, ?, ?, ?)
         `).bind(stock.id, stock.ticker, aiResult.sector, aiResult.catalyst, aiResult.stage, aiResult.heat, aiResult.strategy).run();
 
-        // 分析成功，標記為 1
         await env.DB.prepare("UPDATE RawScans SET is_analyzed = 1 WHERE id = ?").bind(stock.id).run();
         successCount++;
-        
-        // 延遲以避免 API 限流
         await new Promise(r => setTimeout(r, 1200)); 
       } catch (e) {
-        console.error(`分析 ${stock.ticker} 失敗:`, e.message);
-        // 失敗標記為 -1
+        console.error(`${stock.ticker} 失敗: ${e.message}`);
         await env.DB.prepare("UPDATE RawScans SET is_analyzed = -1 WHERE id = ?").bind(stock.id).run();
       }
     }
     return successCount;
   },
-  // --- 模組 C: AI 核心 (修正為 v1 端點) ---
-async analyzeWithGemini(env, stock) {
-  const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash-latest:generateContent?key=${env.GEMINI_API_KEY}`;
 
-  const prompt = `
-你是一位專業分析師。
-請分析股票 ${stock.ticker}，股價 ${stock.close_price}。
-只回傳純 JSON：
-
-{
-  "sector": "",
-  "catalyst": "",
-  "stage": "2",
-  "heat": 5,
-  "strategy": ""
-}
-`;
-
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.1 }
-    })
-  });
-
-  if (!response.ok) {
-    const err = await response.text();
-    console.error("Gemini 狀態碼:", response.status);
-    console.error("Gemini 錯誤:", err);
-    throw new Error("Gemini API 失敗");
-  }
-
-  const data = await response.json();
-
-  if (!data.candidates || data.candidates.length === 0) {
-    throw new Error("無 candidates");
-  }
-
-  const rawText = data.candidates[0]?.content?.parts?.[0]?.text;
-  if (!rawText) throw new Error("無 text");
-
-  const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error("回傳非 JSON");
-
-  return JSON.parse(jsonMatch[0]);
-}
-
-async sendFinalReport(env, today) {
-    // 💡 關鍵修正：改抓所有當前已分析成功 (is_analyzed = 1) 的標的，不綁死日期
-    const { results } = await env.DB.prepare(`
-      SELECT * FROM AIAnalysis 
-      WHERE scan_id IN (SELECT id FROM RawScans WHERE is_analyzed = 1)
-      ORDER BY heat DESC
-    `).all();
-
-    if (!results || results.length === 0) return "資料庫中無已分析標的可發送。";
-
-    let msg = `🔥【美股實戰戰報】${today}\n\n`;
-    results.forEach(p => {
-      msg += `📂 ${p.sector} | **${p.ticker}**\n* 🌡️ 熱度: ${p.heat}🔥 | ${p.strategy_tag}\n* 📰 ${p.catalyst}\n\n`;
+  async analyzeWithGemini(env, stock) {
+    // 💡 修正 2：改用 v1 穩定端點
+    const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
+    
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: `分析美股代號 ${stock.ticker}。股價:${stock.close_price}。請搜尋催化劑。僅回傳純 JSON: {"sector": "板塊", "catalyst": "原因", "stage": "2", "heat": 5, "strategy": "標籤"}` }] }],
+        generationConfig: { response_mime_type: "application/json" }
+      })
     });
 
-    const tgRes = await fetch(`https://api.telegram.org/bot${env.TG_BOT_TOKEN}/sendMessage`, {
+    if (!response.ok) throw new Error(`API 報錯: ${response.status}`);
+    const data = await response.json();
+    const rawText = data.candidates[0].content.parts[0].text;
+    return JSON.parse(rawText.match(/\{[\s\S]*\}/)[0]);
+  },
+
+  async sendFinalReport(env, today) {
+    // 💡 修正 3：只要是當前分析完 (1) 的就發送
+    const report = await env.DB.prepare(`
+      SELECT * FROM AIAnalysis 
+      WHERE scan_id IN (SELECT id FROM RawScans WHERE is_analyzed = 1)
+    `).all();
+
+    const results = report.results || [];
+    if (results.length === 0) return "⚠️ 資料庫中無分析結果可報告";
+
+    let msg = `🔥【美股實戰戰報】\n\n`;
+    results.forEach(p => {
+      msg += `📂 ${p.sector} | **${p.ticker}**\n* 🌡️ 熱度: ${p.heat}🔥\n* 📰 ${p.catalyst}\n\n`;
+    });
+
+    await fetch(`https://api.telegram.org/bot${env.TG_BOT_TOKEN}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chat_id: env.TG_CHAT_ID, text: msg })
     });
 
-    // 💡 發送後可選擇是否將 is_analyzed 改成 2 (代表已回報)，避免下次重複發送
-    if (tgRes.ok) {
-      await env.DB.prepare("UPDATE RawScans SET is_analyzed = 2 WHERE is_analyzed = 1").run();
-      return "Telegram 發送完成";
-    }
-    return "Telegram 發送失敗";
+    // 發送後標記為 2，避免重複
+    await env.DB.prepare("UPDATE RawScans SET is_analyzed = 2 WHERE is_analyzed = 1").run();
+    return "✅ Telegram 報告發送完成";
   }
 };

@@ -8,7 +8,7 @@ async function callGemini(prompt, systemInstruction, apiKey) {
     contents: [{ role: "user", parts: [{ text: prompt }] }],
     systemInstruction: { parts: [{ text: systemInstruction }] },
     tools: [{ googleSearch: {} }],
-    generationConfig: { responseMimeType: "application/json", temperature: 0.1 } // 🌟 強制 AI 輸出 JSON
+    generationConfig: { responseMimeType: "application/json", temperature: 0.1 } 
   };
 
   const res = await fetch(geminiUrl, {
@@ -22,7 +22,6 @@ async function callGemini(prompt, systemInstruction, apiKey) {
   const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
   
   try {
-    // 嘗試解析 AI 回傳的 JSON 字串
     return JSON.parse(text.replace(/```json\n?|\n?```/g, '').trim());
   } catch (e) {
     console.error("Gemini JSON 解析失敗", text);
@@ -30,7 +29,7 @@ async function callGemini(prompt, systemInstruction, apiKey) {
   }
 }
 
-// 主程式
+// 主程式：生成報告並寫入資料庫
 async function generateTradingReport(env) {
   try {
     const isUS = true;
@@ -53,7 +52,7 @@ async function generateTradingReport(env) {
       symbols: { query: { types: ["stock"] }, tickers: [] },
       columns: ["name", "description", "close", "SMA20", "SMA50", "SMA200"], 
       sort: { sortBy: "Perf.1M", sortOrder: "desc" },
-      range: [0, 50] // TV 先抓 50 檔
+      range: [0, 50] 
     };
 
     const tvResponse = await fetch(tvUrl, {
@@ -67,14 +66,13 @@ async function generateTradingReport(env) {
     let stocks = tvData.data || [];
     if (stocks.length === 0) return "目前沒有符合條件的美股標的。";
 
-    // 🛡️ 限制分析數量 (避免 Gemini 15 RPM 限制與 Worker 超時)
-    // 建議先設為 10~12 檔測試穩定度
+    // 限制分析數量，避免超時與 Rate Limit
     const totalFound = stocks.length;
     const processLimit = 12; 
     stocks = stocks.slice(0, processLimit); 
 
     let rawStockData = {};
-    let analyzedStocks = []; // 存放 AI 分析過後的結構化資料
+    let analyzedStocks = []; 
 
     // ==========================================
     // 階段二：一檔一檔給 AI 分析，並存入 D1
@@ -96,19 +94,18 @@ async function generateTradingReport(env) {
         "company": "${description}",
         "sector": "例如: AI伺服器 / 生技 / 網安",
         "catalyst": "簡述近期新聞、財報或實質利多，限制 50 字內",
-        "hotness": 4, // 1~5的整數
-        "ai_stage": "Stage 2", // Stage 1~4
-        "strategy_tag": "拉回量縮承接" // 限填: 拉回量縮承接 / 突破買進 / 僅觀察 / 高檔風險
+        "hotness": 4, 
+        "ai_stage": "Stage 2", 
+        "strategy_tag": "拉回量縮承接" 
       }
       `;
 
-      // 1. 呼叫 AI 單檔分析
       const aiResult = await callGemini(singlePrompt, singleStockSystemPrompt, env.GEMINI_API_KEY);
       
       if (aiResult) {
         analyzedStocks.push(aiResult);
 
-        // 2. 寫入 D1 資料庫
+        // 寫入 D1 資料庫
         if (env.DB) {
           try {
             await env.DB.prepare(`
@@ -125,7 +122,7 @@ async function generateTradingReport(env) {
         }
       }
 
-      // 🛡️ 關鍵：每分析完一檔，暫停 4 秒，避免觸發 429 Too Many Requests
+      // 暫停 4 秒，避免 Gemini API 限速
       await sleep(4000); 
     }
 
@@ -136,7 +133,6 @@ async function generateTradingReport(env) {
     // ==========================================
     const summarySystemPrompt = "你是一位實戰派的美股趨勢交易員。請根據我提供的 JSON 陣列數據，撰寫精煉的盤後戰情報告。禁止任何開場白或結語。";
     
-    // 把剛剛整理好的乾淨資料轉成字串，請 AI 排版
     const summaryPrompt = `
     以下是今日經過單檔深度分析後，從資料庫彙整出來的 ${analyzedStocks.length} 檔強勢股資料（JSON格式）：
     ${JSON.stringify(analyzedStocks, null, 2)}
@@ -160,7 +156,6 @@ async function generateTradingReport(env) {
     (依照你身為交易員的經驗，針對上述最大的板塊，給出 2 檔潛力外溢的觀察股與策略方向)
     `;
 
-    // 因為這次只是排版，不再需要強制輸出 JSON，所以直接打一般文字的 Gemini 請求
     const finalReportUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
     const finalRes = await fetch(finalReportUrl, {
       method: "POST",
@@ -180,3 +175,48 @@ async function generateTradingReport(env) {
     return `執行發生嚴重錯誤: ${error.message}`;
   }
 }
+
+// 發送訊息至 Telegram 
+async function sendToTelegram(message, env) {
+  if (!env.TG_BOT_TOKEN || !env.TG_CHAT_ID) return;
+  const tgUrl = `https://api.telegram.org/bot${env.TG_BOT_TOKEN}/sendMessage`;
+  
+  await fetch(tgUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ 
+      chat_id: env.TG_CHAT_ID, 
+      text: message 
+    })
+  });
+}
+
+// ==========================================
+// 🚀 Cloudflare Worker 進入點 (ES Module 格式)
+// ==========================================
+export default {
+  // 網頁手動觸發測試
+  async fetch(request, env, ctx) {
+    // 將耗時任務丟到背景執行，避免瀏覽器等待超時
+    ctx.waitUntil((async () => {
+      try {
+        const report = await generateTradingReport(env);
+        await sendToTelegram(report, env);
+      } catch (err) {
+        console.error("背景執行失敗:", err);
+      }
+    })());
+
+    // 網頁立即回覆
+    return new Response(
+      "✅ 系統已收到指令！\n\n機器人正在背景逐檔分析美股新聞並寫入資料庫。\n由於加入了防限制(Rate Limit)機制，預計需耗時 1 分鐘左右，完成後會自動推播至您的 Telegram，請稍候並留意手機通知！", 
+      { headers: { "Content-Type": "text/plain;charset=UTF-8" } }
+    );
+  },
+
+  // 定時排程觸發 (Cron Triggers)
+  async scheduled(event, env, ctx) {
+    const report = await generateTradingReport(env);
+    await sendToTelegram(report, env);
+  }
+};

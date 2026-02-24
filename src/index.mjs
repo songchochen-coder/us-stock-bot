@@ -3,7 +3,7 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // 輔助函數：呼叫 Gemini API
 async function callGemini(prompt, systemInstruction, apiKey) {
-  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
   const payload = {
     contents: [{ role: "user", parts: [{ text: prompt }] }],
     systemInstruction: { parts: [{ text: systemInstruction }] },

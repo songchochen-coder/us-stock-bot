@@ -7,60 +7,72 @@ export default {
   async runTask(env) {
     console.log("🚀 機器人啟動...");
     try {
-      // 1. 測試股票清單
+      // 1. 準備金鑰與 ID (增加強制修剪與錯誤檢查)
+      const apiKey = String(env.GEMINI_API_KEY || "").trim();
+      const chatId = String(env.TG_CHAT_ID || "").trim();
+      const tgToken = String(env.TG_BOT_TOKEN || "").trim();
+
+      if (!chatId) {
+        console.error("❌ 錯誤：TG_CHAT_ID 是空的！請檢查 Cloudflare 變數設定。");
+        return new Response("錯誤：TG_CHAT_ID 未設定");
+      }
+
       const stockList = ["TSM", "NVDA", "AAPL"];
-      let report = "🚀 **美股 AI 分析報告** (測試中)\n\n";
+      let report = "🚀 **美股 AI 分析報告**\n\n";
 
       for (let i = 0; i < stockList.length; i++) {
         const symbol = stockList[i];
-        console.log(`正在分析: ${symbol}...`);
+        console.log(`正在分析 (${i + 1}/3): ${symbol}...`);
 
-        // ✅ 修正：使用目前最穩定的 v1beta + latest 標籤
-        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${env.GEMINI_API_KEY.trim()}`;
+        // ✅ 修正：改用 v1 穩定版 API 路徑，確保模型能被找到
+        const geminiUrl = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
 
         try {
           const res = await fetch(geminiUrl, {
             method: 'POST',
-            body: JSON.stringify({ contents: [{ parts: [{ text: `分析 ${symbol} 近期趨勢，50字以內繁體中文。` }] }] })
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: `請簡短分析美股 ${symbol} 近期趨勢，50字內繁體中文。` }] }]
+            })
           });
 
           const data = await res.json();
           if (res.ok && data.candidates) {
             const analysis = data.candidates[0].content.parts[0].text;
             report += `📈 **${symbol}**\n${analysis.trim()}\n\n`;
+            console.log(`✅ ${symbol} 分析成功`);
           } else {
-            const errMsg = data.error ? data.error.message : "API 路徑錯誤";
-            report += `❌ **${symbol}** 分析失敗 (${errMsg})\n\n`;
+            const msg = data.error ? data.error.message : "模型路徑不支援";
+            console.error(`❌ ${symbol} 失敗: ${msg}`);
+            report += `❌ **${symbol}** 分析失敗 (${msg})\n\n`;
           }
         } catch (e) {
-          report += `❌ **${symbol}** 連線錯誤\n\n`;
+          report += `❌ **${symbol}** 系統異常\n\n`;
         }
-        await sleep(2000); // 避開限制
+        await sleep(2000); 
       }
 
-      // 2. 發送報告
-      const chatId = String(env.TG_CHAT_ID).trim();
-      console.log(`準備發送至 ChatID: ${chatId}`);
-      
-      const tgUrl = `https://api.telegram.org/bot${env.TG_BOT_TOKEN}/sendMessage`;
+      // 2. 發送報告至 Telegram
+      const tgUrl = `https://api.telegram.org/bot${tgToken}/sendMessage`;
       const tgRes = await fetch(tgUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: chatId,
-          text: report + "\n感謝您的耐心測試！",
+          text: report + "📝 *分析完成*",
           parse_mode: "Markdown"
         })
       });
 
       if (tgRes.ok) {
-        return new Response("發送成功！請檢查 Telegram。");
+        console.log("🎉 報告已成功發送至 Telegram！");
+        return new Response("OK! 傳送成功。");
       } else {
         const tgErr = await tgRes.text();
+        console.error(`❌ Telegram 發送失敗: ${tgErr}`);
         return new Response("Telegram 錯誤: " + tgErr);
       }
     } catch (error) {
-      return new Response("系統崩潰: " + error.message);
+      return new Response("崩潰: " + error.message);
     }
   }
 };

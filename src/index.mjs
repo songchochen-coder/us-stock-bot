@@ -37,7 +37,7 @@ export default {
         console.log(`正在分析 (${i + 1}/${stockList.length}): ${symbol}...`);
 
         // 修正後的 Gemini v1beta 網址
-        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
+        const geminiUrl = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
 
         const prompt = `請分析美股代號 ${symbol} 的近期趨勢，並給出操作建議。請用繁體中文回答，總字數限制在 50 字以內。`;
 

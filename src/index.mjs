@@ -62,28 +62,49 @@ export default {
     return stocks.length;
   },
 
-  // --- 修正後的 Processor ---
-  async processAllPending(env, today) {
+async processAllPending(env, today) {
+    // 1. 只抓取今天且尚未分析的原始資料
     const pending = await env.DB.prepare(
-      "SELECT * FROM RawScans WHERE scan_date = ? AND is_analyzed = 0"
+      "SELECT id, ticker, company_name, close_price, sma_20, sma_50 FROM RawScans WHERE scan_date = ? AND is_analyzed = 0"
     ).bind(today).all();
+
+    // 2. 檢查是否有資料，避免空跑
+    if (!pending.results || pending.results.length === 0) {
+      console.log("今日無待分析標的");
+      return;
+    }
 
     for (const stock of pending.results) {
       try {
         const aiResult = await this.analyzeWithGemini(env, stock);
+        
+        // 3. 寫入分析表：確保 stock.id 是從 RawScans 抓出來的有效 ID
         await env.DB.prepare(`
           INSERT INTO AIAnalysis (scan_id, ticker, sector, catalyst, ai_stage, heat, strategy_tag)
           VALUES (?, ?, ?, ?, ?, ?, ?)
-        `).bind(stock.id, stock.ticker, aiResult.sector, aiResult.catalyst, aiResult.stage, aiResult.heat, aiResult.strategy).run();
+        `).bind(
+            stock.id,        // 這裡是關鍵，必須對應 RawScans 的 id
+            stock.ticker, 
+            aiResult.sector, 
+            aiResult.catalyst, 
+            aiResult.stage, 
+            aiResult.heat, 
+            aiResult.strategy
+        ).run();
 
+        // 4. 更新狀態
         await env.DB.prepare("UPDATE RawScans SET is_analyzed = 1 WHERE id = ?").bind(stock.id).run();
-        await new Promise(r => setTimeout(r, 1000)); // 降速保護
+        
+        // 稍微停頓，保護 API
+        await new Promise(r => setTimeout(r, 1500)); 
+
       } catch (e) {
-        console.error(`${stock.ticker} 失敗:`, e);
+        console.error(`${stock.ticker} 分析失敗:`, e.message);
+        // 標記失敗，避免下次無限重試
+        await env.DB.prepare("UPDATE RawScans SET is_analyzed = -1 WHERE id = ?").bind(stock.id).run();
       }
     }
   },
-
   // --- 修正後的 AI 模塊 (處理 JSON 格式) ---
 async analyzeWithGemini(env, stock) {
     // 修正點：使用 v1beta 並確保模型名稱正確

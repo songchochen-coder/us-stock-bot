@@ -10,65 +10,64 @@ export default {
   },
 
   async runTask(env) {
-    console.log("🚀 任務開始啟動...");
+    console.log("🚀 任務啟動...");
     try {
+      // 1. 基本股票清單 (測試用)
       const stockList = ["TSM", "NVDA", "AAPL"];
-      let report = "🚀 **美股強勢股 AI 分析報告**\n\n";
+      let report = "🚀 **美股 AI 分析報告**\n\n";
+
+      // 檢查金鑰並自動去空格
+      const apiKey = String(env.GEMINI_API_KEY || "").trim();
+      const chatId = String(env.TG_CHAT_ID || "").trim();
 
       for (let i = 0; i < stockList.length; i++) {
         const symbol = stockList[i];
         console.log(`正在分析 (${i + 1}/3): ${symbol}...`);
 
-        // ✅ 修正點：將 v1beta 改為 v1 穩定版網址
-        const geminiUrl = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
-
-        const prompt = `請分析美股代號 ${symbol} 的近期趨勢，並給出操作建議。請用繁體中文回答，總字數限制在 50 字以內。`;
+        // ✅ 終極修正：使用 v1beta 搭配 gemini-1.5-flash-latest
+        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${apiKey}`;
 
         try {
           const res = await fetch(geminiUrl, {
             method: 'POST',
-            body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: `分析 ${symbol} 近期趨勢，50字以內繁體中文。` }] }]
+            })
           });
 
-          if (res.ok) {
-            const data = await res.json();
+          const data = await res.json();
+          if (res.ok && data.candidates) {
             const analysis = data.candidates[0].content.parts[0].text;
             report += `📈 **${symbol}**\n${analysis.trim()}\n\n`;
             console.log(`✅ ${symbol} 分析成功`);
           } else {
-            const errDetail = await res.text();
-            console.error(`❌ ${symbol} 分析失敗: ${errDetail}`);
-            report += `❌ **${symbol}** 分析失敗 (API 錯誤)\n\n`;
+            const errMsg = data.error ? data.error.message : "未知錯誤";
+            console.error(`❌ ${symbol} 失敗: ${errMsg}`);
+            report += `❌ **${symbol}** 分析失敗 (${errMsg})\n\n`;
           }
         } catch (e) {
-          console.error(`❌ ${symbol} 異常: ${e.message}`);
+          report += `❌ **${symbol}** 系統錯誤\n\n`;
         }
         await sleep(2000);
       }
 
-      report += "📝 *本報告由 AI 自動產生，僅供參考。*";
-
-      const chatId = String(env.TG_CHAT_ID).trim();
+      // 2. 發送至 Telegram
       const tgUrl = `https://api.telegram.org/bot${env.TG_BOT_TOKEN}/sendMessage`;
-
-      const tgRes = await fetch(tgUrl, {
+      await fetch(tgUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: chatId,
-          text: report,
+          text: report + "\n📝 *自動分析完成*",
           parse_mode: "Markdown"
         })
       });
 
-      if (tgRes.ok) {
-        console.log("🎉 報告已成功送達 Telegram！");
-        return new Response("OK! 已發送。");
-      } else {
-        return new Response("Telegram 失敗");
-      }
+      console.log("🎉 報告已送出！");
+      return new Response("OK! 已發送。");
+
     } catch (error) {
-      return new Response("系統崩潰: " + error.message);
+      return new Response("崩潰: " + error.message);
     }
   }
 };

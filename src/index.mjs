@@ -25,7 +25,7 @@ export default {
         console.log(`正在分析 (${i + 1}/3): ${symbol}...`);
 
         // ✅ 終極修正：使用 v1beta 搭配 gemini-1.5-flash-latest
-        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${apiKey}`;
+       const geminiUrl = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
 
         try {
           const res = await fetch(geminiUrl, {

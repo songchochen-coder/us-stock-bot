@@ -1,34 +1,34 @@
 export default {
-  async fetch(request, env, ctx) {
+ async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const action = url.searchParams.get("action");
-
-    // 強制設定為台灣日期 (避免 UTC 換日問題)
     const today = new Date(new Date().getTime() + 8 * 3600 * 1000).toISOString().split('T')[0];
 
     if (action === "run") {
-      ctx.waitUntil((async () => {
-        try {
-          // 1. 掃描
-          const count = await this.ingestStocks(env, today);
-          if (count === 0) {
-            await this.postToTelegram(`⚠️ ${today} 無符合條件標的`, env);
-            return;
-          }
+      // ⚠️ 注意：暫時拿掉 ctx.waitUntil，讓網頁等它跑完
+      try {
+        let status = "開始掃描...\n";
+        
+        // 1. 掃描
+        const count = await this.ingestStocks(env, today);
+        status += `✅ 掃描完成，入庫 ${count} 檔\n`;
 
-          // 2. 處理
-          await this.processAllPending(env, today);
+        // 2. 處理 (這段最容易斷)
+        await this.processAllPending(env, today);
+        status += `✅ AI 分析完成\n`;
 
-          // 3. 報告
-          await this.sendFinalReport(env, today);
-        } catch (err) {
-          await this.postToTelegram(`❌ 執行失敗: ${err.message}`, env);
-        }
-      })());
-      return new Response(`🚀 任務已啟動！今日標記日期：${today}`);
+        // 3. 報告
+        await this.sendFinalReport(env, today);
+        status += `✅ Telegram 報告發送指令已下達\n`;
+
+        return new Response(status);
+      } catch (err) {
+        // 如果中間斷掉，網頁會直接噴出錯誤訊息
+        return new Response(`❌ 執行中斷: ${err.message}\n堆疊: ${err.stack}`);
+      }
     }
-
-    return new Response("使用 ?action=run 啟動機器人");
+    return new Response("請使用 ?action=run");
+  },
   },
 
   // --- 修正後的 Ingester ---

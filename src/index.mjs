@@ -103,13 +103,12 @@ export default {
     return successCount;
   },
 
-  // --- 模組 C: AI 核心 (最強防呆解析) ---
-  async analyzeWithGemini(env, stock) {
+ async analyzeWithGemini(env, stock) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
     
-    const prompt = `分析美股代號 ${stock.ticker}。股價:${stock.close_price}, 20MA:${stock.sma_20}。請尋找該公司近期重大利多或催化劑。
-    請嚴格回傳 JSON 格式：
-    { "sector": "板塊名稱", "catalyst": "上漲原因", "stage": "1-4", "heat": 5, "strategy": "建議標籤" }`;
+    const prompt = `分析美股 ${stock.ticker}。股價:${stock.close_price}。請搜尋近期催化劑。
+    請嚴格回傳以下格式 JSON：
+    {"sector": "板塊", "catalyst": "原因", "stage": "2", "heat": 5, "strategy": "標籤"}`;
 
     const response = await fetch(url, {
       method: "POST",
@@ -118,13 +117,17 @@ export default {
     });
 
     const data = await response.json();
-    if (!data.candidates) throw new Error(`Gemini 無法回傳結果: ${JSON.stringify(data)}`);
+    
+    // 🔍 增加：如果 API 報錯的處理
+    if (!data.candidates || data.candidates.length === 0) {
+      throw new Error(`AI 無回應: ${JSON.stringify(data)}`);
+    }
     
     const rawText = data.candidates[0].content.parts[0].text;
     
-    // 防呆：用正規表達式提取 JSON 部分，防止 AI 多廢話
+    // 🌟 最強防呆：只抓取第一個 { 到最後一個 } 之間的文字
     const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error(`AI 回傳非 JSON 格式: ${rawText}`);
+    if (!jsonMatch) throw new Error("回傳內容找不到 JSON 對象");
     
     return JSON.parse(jsonMatch[0]);
   },

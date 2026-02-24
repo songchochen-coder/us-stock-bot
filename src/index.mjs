@@ -103,33 +103,51 @@ export default {
     return successCount;
   },
 
- async analyzeWithGemini(env, stock) {
+async analyzeWithGemini(env, stock) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
     
-    const prompt = `分析美股 ${stock.ticker}。股價:${stock.close_price}。請搜尋近期催化劑。
-    請嚴格回傳以下格式 JSON：
-    {"sector": "板塊", "catalyst": "原因", "stage": "2", "heat": 5, "strategy": "標籤"}`;
+    // 增加：明確要求 AI 不要回傳任何 Markdown 標籤
+    const prompt = `你是一位美股分析師。請分析 ${stock.ticker}。股價:${stock.close_price}。
+    請搜尋近期利多原因。
+    必須嚴格回傳純 JSON 格式，嚴禁包含 \`\`\`json 等標籤。
+    格式範例：{"sector": "科技", "catalyst": "財報優於預期", "stage": "2", "heat": 5, "strategy": "突破買進"}`;
 
     const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { 
+          temperature: 0.1, // 降低隨機性，讓輸出更穩定
+          response_mime_type: "application/json" // 強制模型輸出 JSON 格式 (Gemini 1.5 支援)
+        }
+      })
     });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Gemini API 請求失敗: ${response.status} - ${errorText}`);
+    }
 
     const data = await response.json();
     
-    // 🔍 增加：如果 API 報錯的處理
-    if (!data.candidates || data.candidates.length === 0) {
-      throw new Error(`AI 無回應: ${JSON.stringify(data)}`);
+    if (!data.candidates || !data.candidates[0].content) {
+      throw new Error(`AI 回傳內容為空: ${JSON.stringify(data)}`);
     }
+
+    let rawText = data.candidates[0].content.parts[0].text;
     
-    const rawText = data.candidates[0].content.parts[0].text;
-    
-    // 🌟 最強防呆：只抓取第一個 { 到最後一個 } 之間的文字
-    const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("回傳內容找不到 JSON 對象");
-    
-    return JSON.parse(jsonMatch[0]);
+    try {
+      // 1. 嘗試直接解析
+      return JSON.parse(rawText);
+    } catch (e) {
+      // 2. 如果解析失敗，使用正規表達式強行提取 JSON 部分
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        return JSON.parse(jsonMatch[0]);
+      }
+      throw new Error(`無法從 AI 回傳中解析 JSON。原始文字: ${rawText.substring(0, 50)}...`);
+    }
   },
 
   // --- 模組 D: Reporter (SQL 彙整) ---

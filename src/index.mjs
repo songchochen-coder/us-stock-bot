@@ -85,21 +85,38 @@ export default {
   },
 
   // --- 修正後的 AI 模塊 (處理 JSON 格式) ---
-  async analyzeWithGemini(env, stock) {
-    const prompt = `分析美股代號 ${stock.ticker}。收盤:${stock.close_price}, 均線:${stock.sma_20}/${stock.sma_50}。請搜尋最新消息，僅回傳 JSON: { "sector": "板塊", "catalyst": "原因", "stage": "1-4", "heat": 5, "strategy": "標籤" }`;
+async analyzeWithGemini(env, stock) {
+    // 修正點：使用 v1beta 並確保模型名稱正確
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
     
+    const prompt = `分析美股代號 ${stock.ticker}。目前的價格為 ${stock.close_price}。請搜尋該公司近期催化劑與板塊。
+    請嚴格僅回傳 JSON 格式，不要有任何 Markdown 標籤：
+    { "sector": "板塊", "catalyst": "原因", "stage": "1-4", "heat": 5, "strategy": "標籤" }`;
+
     const response = await fetch(url, {
       method: "POST",
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.2 } // 降低隨機性，確保 JSON 穩定
+      })
     });
+
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`Gemini API 報錯: ${response.status} - ${err}`);
+    }
+
     const data = await response.json();
+    
+    if (!data.candidates || !data.candidates[0].content) {
+      throw new Error(`Gemini 回傳結構異常: ${JSON.stringify(data)}`);
+    }
+
     const rawText = data.candidates[0].content.parts[0].text;
-    // 去除 AI 可能多加的 markdown 標籤
     const cleanJson = rawText.replace(/```json|```/gi, "").trim();
     return JSON.parse(cleanJson);
   },
-
   // --- 修正後的 Reporter ---
   async sendFinalReport(env, today) {
     const picks = await env.DB.prepare(`

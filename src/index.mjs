@@ -54,45 +54,49 @@ export default {
   },
 
 async processWithCFAI(env) {
-    // 💡 診斷：檢查 AI 物件是否存在
+    // 💡 確保 AI 已經被正確注入
     if (!env.AI) {
-      throw new Error("❌ [系統錯誤] env.AI 未定義。請確認：1. Binding 名稱叫 AI 2. 已重新按下 Save and Deploy。");
+      throw new Error("系統偵測到 env.AI 仍為空。請嘗試重新 Save and Deploy。");
     }
 
-    const query = await env.DB.prepare("SELECT * FROM RawScans WHERE is_analyzed = 0 LIMIT 5").all();
+    // 💡 加大處理量到 10 檔，消化那 450 檔
+    const query = await env.DB.prepare("SELECT * FROM RawScans WHERE is_analyzed = 0 LIMIT 10").all();
     const stocks = query.results || [];
     if (stocks.length === 0) return 0;
 
     let successCount = 0;
     for (const stock of stocks) {
       try {
-        // 使用更穩定的模型名稱
+        // 使用 Meta 的 Llama 3 模型，這是目前最穩定的
         const aiResponse = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
           messages: [
-            { role: 'system', content: 'You are a stock analyst. Reply only in valid JSON.' },
-            { role: 'user', content: `Analyze ticker ${stock.ticker}. Return JSON: {"sector":"...","catalyst":"...","heat":5,"strategy":"..."}` }
+            { role: 'system', content: 'You are a professional stock analyst. Respond ONLY with valid JSON.' },
+            { role: 'user', content: `Analyze ${stock.ticker} (Price: ${stock.close_price}). Format: {"sector":"","catalyst":"","heat":5,"strategy":""}` }
           ]
         });
 
-        const rawText = aiResponse.response || aiResponse; 
+        // 處理回傳
+        const rawText = aiResponse.response || aiResponse;
         const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) continue;
+        if (!jsonMatch) throw new Error("AI output format error");
         
         const aiResult = JSON.parse(jsonMatch[0]);
 
+        // 寫入分析結果
         await env.DB.prepare(`INSERT INTO AIAnalysis (scan_id, ticker, sector, catalyst, ai_stage, heat, strategy_tag) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-          .bind(stock.id, stock.ticker, aiResult.sector || "Tech", aiResult.catalyst || "N/A", "2", aiResult.heat || 3, aiResult.strategy || "Watch").run();
+          .bind(stock.id, stock.ticker, aiResult.sector, aiResult.catalyst, "2", aiResult.heat, aiResult.strategy).run();
 
+        // 標記成功
         await env.DB.prepare("UPDATE RawScans SET is_analyzed = 1 WHERE id = ?").bind(stock.id).run();
         successCount++;
       } catch (e) {
-        // 如果單檔分析失敗，跳過並標記失敗，不卡住後面的 450 檔
+        console.error(`分析失敗 ${stock.ticker}: ${e.message}`);
+        // 失敗標記為 -1，避免死迴圈
         await env.DB.prepare("UPDATE RawScans SET is_analyzed = -1 WHERE id = ?").bind(stock.id).run();
       }
     }
     return successCount;
   },
-
   async sendFinalReport(env, today) {
     const report = await env.DB.prepare(`SELECT * FROM AIAnalysis WHERE scan_id IN (SELECT id FROM RawScans WHERE is_analyzed = 1)`).all();
     const results = report.results || [];

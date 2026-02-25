@@ -78,7 +78,8 @@ export default {
   },
 
 async analyzeWithGemini(env, stock) {
-    const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
+    // 💡 關鍵修正：切換回 v1beta 並確保 URL 格式完全符合規範
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
     
     const response = await fetch(url, {
       method: "POST",
@@ -86,17 +87,13 @@ async analyzeWithGemini(env, stock) {
       body: JSON.stringify({
         contents: [{ 
           parts: [{ 
-            text: `Analyze US stock ${stock.ticker} for Feb 2026. 
-            Search for latest news and catalysts. 
-            Return ONLY a JSON object in this format: 
-            {"sector":"Industry Name","catalyst":"Latest News","stage":"2","heat":5,"strategy":"Action"}` 
+            text: `Analyze US stock ${stock.ticker}. Today is Feb 26, 2026. 
+            Search for recent catalysts. 
+            Return ONLY a JSON object: 
+            {"sector":"Industry","catalyst":"News","stage":"2","heat":5,"strategy":"Action"}` 
           }] 
         }],
-        // 💡 修正點：移除可能報錯的 response_mime_type，改用最基礎的配置
-        generationConfig: {
-          temperature: 0.2,
-          maxOutputTokens: 200
-        }
+        // 💡 移除 generationConfig 以避免任何欄位不匹配的風險
       })
     });
 
@@ -108,14 +105,14 @@ async analyzeWithGemini(env, stock) {
     const data = await response.json();
     
     if (!data.candidates || !data.candidates[0].content) {
-      throw new Error("AI 無法生成內容，請檢查 Key 是否有餘額或被限制");
+      throw new Error("AI 回傳結構異常，可能受到地區或內容安全過濾限制");
     }
 
     const rawText = data.candidates[0].content.parts[0].text;
     
-    // 💡 強力解析：從文字中抓取 JSON 部分
+    // 從文字中提取 JSON
     const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("AI 回傳內容不包含 JSON");
+    if (!jsonMatch) throw new Error("AI 輸出的文字中找不到 JSON 物件");
     
     return JSON.parse(jsonMatch[0]);
   },

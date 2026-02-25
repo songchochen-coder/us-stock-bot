@@ -77,26 +77,47 @@ export default {
     return successCount;
   },
 
-  async analyzeWithGemini(env, stock) {
+async analyzeWithGemini(env, stock) {
     const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
     
     const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: `Analyze US stock ${stock.ticker} for Feb 2026. Return JSON only: {"sector":"","catalyst":"","stage":"","heat":5,"strategy":""}` }] }],
-        generationConfig: { response_mime_type: "application/json" }
+        contents: [{ 
+          parts: [{ 
+            text: `Analyze US stock ${stock.ticker} for Feb 2026. 
+            Search for latest news and catalysts. 
+            Return ONLY a JSON object in this format: 
+            {"sector":"Industry Name","catalyst":"Latest News","stage":"2","heat":5,"strategy":"Action"}` 
+          }] 
+        }],
+        // 💡 修正點：移除可能報錯的 response_mime_type，改用最基礎的配置
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 200
+        }
       })
     });
 
     if (!response.ok) {
       const errBody = await response.text();
-      // 🚀 將 Google 的原始報錯拋出
       throw new Error(`Google API 報錯 (${response.status}): ${errBody}`);
     }
 
     const data = await response.json();
-    return JSON.parse(data.candidates[0].content.parts[0].text);
+    
+    if (!data.candidates || !data.candidates[0].content) {
+      throw new Error("AI 無法生成內容，請檢查 Key 是否有餘額或被限制");
+    }
+
+    const rawText = data.candidates[0].content.parts[0].text;
+    
+    // 💡 強力解析：從文字中抓取 JSON 部分
+    const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error("AI 回傳內容不包含 JSON");
+    
+    return JSON.parse(jsonMatch[0]);
   },
 
   async sendFinalReport(env, today) {

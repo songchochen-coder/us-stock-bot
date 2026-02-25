@@ -1,25 +1,25 @@
-// 【美股專屬】實戰交易決策與量化資料庫寫入機器人
+// 【美股優化版】實戰交易決策與量化資料庫寫入機器人
 async function generateTradingReport(env) {
   try {
-    const isUS = true; // 切換為美股
+    const isUS = true; 
     const marketStr = isUS ? "US" : "TW";
     const today = new Date().toISOString().split('T')[0];
 
-    // 1. 呼叫 TradingView API (美股強勢股濾網：市值>100億美元、均量>200萬股、週漲幅>15%)
-    // 注意：美股需使用 global/scan 且必須帶上 User-Agent 避免 403 錯誤
+    // 1. 呼叫 TradingView API (調整後的美股濾網)
     const tvUrl = "https://scanner.tradingview.com/global/scan";
     const tvPayload = {
       filter: [
-        { left: "Perf.M", operation: "greater", right: 20 },
-        { left: "market_cap_basic", operation: "greater", right: 10000000000 },
-        { left: "average_volume_30d_calc", operation: "greater", right: 2000000 }
+        { left: "Perf.W", operation: "greater", right: 5 },       // 週漲幅 > 5% (放寬)
+        { left: "Perf.M", operation: "greater", right: 15 },      // 月漲幅 > 15% (微調)
+        { left: "market_cap_basic", operation: "greater", right: 2000000000 }, // 市值 > 20億美元 (納入中型股)
+        { left: "average_volume_30d_calc", operation: "greater", right: 500000 } // 均量 > 50萬股 (放寬)
       ],
       options: { lang: "zh_TW" },
       markets: ["america"],
       symbols: { query: { types: ["stock"] }, tickers: [] },
       columns: ["name", "description", "close", "SMA20", "SMA50", "SMA200"], 
       sort: { sortBy: "Perf.W", sortOrder: "desc" },
-      range: [0, 50] // 美股數量較多，先抓前 50 檔最強的進入 AI 分析
+      range: [0, 50] 
     };
 
     const tvResponse = await fetch(tvUrl, {
@@ -32,15 +32,12 @@ async function generateTradingReport(env) {
       body: JSON.stringify(tvPayload)
     });
 
-    if (!tvResponse.ok) {
-      const errorMsg = await tvResponse.text();
-      return `⚠️ TradingView 美股 API 請求失敗 (狀態碼: ${tvResponse.status})`;
-    }
+    if (!tvResponse.ok) return `⚠️ TradingView 美股 API 請求失敗 (狀態碼: ${tvResponse.status})`;
     
     const tvData = await tvResponse.json();
     const stocks = tvData.data || [];
 
-    if (stocks.length === 0) return "目前沒有符合條件（週漲幅>15%、市值>100億美元、均量>200萬股）的美股標的。";
+    if (stocks.length === 0) return "📉 目前仍沒有符合放寬後條件的美股標的，建議檢查盤勢或進一步降低標準。";
 
     // 2. 格式化資料
     let rawStockData = {};
@@ -57,89 +54,79 @@ async function generateTradingReport(env) {
       allStocksList.push(`[${name}] ${description} (收盤:$${c} | 20MA:$${m20} | 50MA:$${m50} | 200MA:$${m200})`);
     });
 
-    // 3. 呼叫 Gemini API
+    // 3. 呼叫 Gemini API 
     const prompt = `
-      以下為本週符合強勢濾網的【美股】名單與實際均線數據（共 ${stocks.length} 檔）：
+      以下為本週符合強勢濾網的【美股】名單與均線數據（共 ${stocks.length} 檔）：
       【${allStocksList.join("、")}】
 
-      請以「頂級美股趨勢交易者」角度分析。重心轉向「主流回測量縮」與「低位階補漲」。
+      請以「專業美股趨勢交易者」角度分析。重心為「主流回測」與「低位階補漲」。
       請直接輸出：
 
       【一】美股強勢股實戰策略
       ### 📂 [板塊名稱] (主流核心/次主流/非主流)
       🔹 **[代號] 公司名稱** (題材簡述)
-      * 🌡️ **熱度**：[1~5顆🔥]
       * 📈 **位階**：Stage [1~4] ｜ 乖離風險：[高/中/低]
       * ⚔️ **策略**：**【建議標籤】** (⚠️ 限填: 拉回量縮承接 / 低檔試單 / 僅觀察 / 高檔風險)
 
-      【二】潛力擴散與低位階補漲族群推演
-      (對應板塊推演出 2 個外溢次產業)
-
-      【三】資料庫寫入專用 JSON
+      【二】資料庫寫入專用 JSON
       \`\`\`json
       [
-        { "ticker": "NVDA", "company": "NVIDIA", "sector": "AI晶片", "ai_stage": "Stage 2", "strategy": "高檔風險" }
+        { "ticker": "代號", "company": "名稱", "sector": "板塊", "ai_stage": "Stage X", "strategy": "標籤" }
       ]
       \`\`\`
     `;
 
-    // 統一使用目前最穩定的 1.5-flash
     const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
     const aiResponse = await fetch(geminiUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        systemInstruction: {
-          parts: [{ text: "你是一位實戰派的美股趨勢交易員。極度厭惡追高。操作紀律是：只做核心主流的回測量縮。" }]
-        }
+        contents: [{ role: "user", parts: [{ text: prompt }] }]
       })
     });
 
     const aiData = await aiResponse.json();
     const rawAnalysis = aiData?.candidates?.[0]?.content?.parts?.[0]?.text || "";
 
-    if (!rawAnalysis) return "⚠️ AI 回應異常";
+    if (!rawAnalysis) return "⚠️ AI 報告生成失敗";
 
-    // 4. 解析 JSON 與清理畫面
+    // 4. 解析 JSON 並寫入 D1
     let reportForTelegram = rawAnalysis;
     let dbJsonArray = [];
     const jsonMatch = rawAnalysis.match(/```json\n([\s\S]*?)\n```/);
     if (jsonMatch) {
       try {
         dbJsonArray = JSON.parse(jsonMatch[1]);
-        reportForTelegram = rawAnalysis.split(/【三】/)[0].trim();
-      } catch(e) { console.error("JSON 解析失敗", e); }
+        reportForTelegram = rawAnalysis.split(/```json/)[0].trim();
+      } catch(e) { console.error("JSON Error", e); }
     }
 
-    // 5. 寫入 D1 資料庫
     if (env.DB && dbJsonArray.length > 0) {
       const stmt = env.DB.prepare(`
         INSERT INTO DailyStockAnalysis (scan_date, market, ticker, company_name, close_price, sma_20, sma_50, sma_200, sector, ai_stage, strategy_tag) 
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
-      
       let batchStmts = [];
       for (let item of dbJsonArray) {
-        const t = item.ticker || "UNKNOWN";
-        const tvData = rawStockData[t] || { close: 0, sma20: 0, sma50: 0, sma200: 0 };
+        const t = item.ticker;
+        const tv = rawStockData[t] || { close: 0, sma20: 0, sma50: 0, sma200: 0 };
         batchStmts.push(stmt.bind(
-          today, marketStr, t, item.company || "UNKNOWN", 
-          Number(tvData.close), Number(tvData.sma20), Number(tvData.sma50), Number(tvData.sma200),
-          item.sector || "N/A", item.ai_stage || "N/A", item.strategy || "N/A"
+          today, marketStr, t, item.company, 
+          Number(tv.close), Number(tv.sma20), Number(tv.sma50), Number(tv.sma200),
+          item.sector, item.ai_stage, item.strategy
         ));
       }
       await env.DB.batch(batchStmts);
     }
 
-    return `🇺🇸【美股實戰交易決策】🇺🇸\n✅ 已完成 ${stocks.length} 檔數據分析並存入 D1。\n\n====================\n${reportForTelegram}`;
+    return `🇺🇸【美股實戰報告】(標準已調低)\n✅ 共掃描 ${stocks.length} 檔標的。\n\n${reportForTelegram}`;
 
   } catch (error) {
     return `執行發生嚴重錯誤: ${error.message}`;
   }
 }
 
-// 發送訊息至 Telegram
+// Telegram 發送 (保持原樣)
 async function sendToTelegram(message, env) {
   if (!env.TG_BOT_TOKEN || !env.TG_CHAT_ID) return;
   const tgUrl = `https://api.telegram.org/bot${env.TG_BOT_TOKEN}/sendMessage`;

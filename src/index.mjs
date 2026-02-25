@@ -11,11 +11,11 @@ export default {
         const count = await this.ingestStocks(env, today);
         debugLog += `✅ 成功入庫: ${count} 檔\n`;
 
-        // 2. 核心診斷：分析前先查一次數量
+        // 2. 診斷數量
         const check = await env.DB.prepare("SELECT COUNT(*) as c FROM RawScans WHERE is_analyzed = 0").first();
         debugLog += `🔍 診斷：目前資料庫中共有 ${check.c} 檔待分析標的\n`;
 
-        // 3. 執行分析
+        // 3. 執行分析 (核心報錯區)
         debugLog += "⏳ 正在啟動 AI 逐檔分析...\n";
         const analysisCount = await this.processAllPending(env, today);
         debugLog += `✅ 分析完成：共完成 ${analysisCount} 檔\n`;
@@ -26,7 +26,8 @@ export default {
 
         return new Response(debugLog, { headers: { "Content-Type": "text/plain; charset=UTF-8" } });
       } catch (err) {
-        return new Response(`❌ 崩潰：${err.message}\n${err.stack}`);
+        // 🌟 這裡會抓到 analyzeWithGemini 拋出的具體原因
+        return new Response(`❌ 偵測到致命錯誤：\n${err.message}`, { status: 500 });
       }
     }
     return new Response("使用 ?action=run 啟動");
@@ -46,16 +47,11 @@ export default {
       sort: { sortBy: "Perf.1M", sortOrder: "desc" },
       range: [0, 15]
     };
-
     const response = await fetch(tvUrl, { method: "POST", body: JSON.stringify(tvPayload) });
     const tvData = await response.json();
     const stocks = tvData.data || [];
-
     if (stocks.length > 0) {
-      const stmt = env.DB.prepare(`
-        INSERT OR IGNORE INTO RawScans (scan_date, ticker, company_name, close_price, sma_20, sma_50, sma_200, is_analyzed)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 0)
-      `);
+      const stmt = env.DB.prepare(`INSERT OR IGNORE INTO RawScans (scan_date, ticker, company_name, close_price, sma_20, sma_50, sma_200, is_analyzed) VALUES (?, ?, ?, ?, ?, ?, ?, 0)`);
       const batch = stocks.map(s => stmt.bind(today, s.d[0], s.d[1], s.d[2], s.d[3], s.d[4], s.d[5]));
       await env.DB.batch(batch);
     }
@@ -63,77 +59,53 @@ export default {
   },
 
   async processAllPending(env, today) {
-    // 💡 修正 1：移除解構，確保抓到資料
-    const query = await env.DB.prepare("SELECT * FROM RawScans WHERE is_analyzed = 0").all();
-    const stocksToAnalyze = query.results || [];
+    const query = await env.DB.prepare("SELECT * FROM RawScans WHERE is_analyzed = 0 LIMIT 5").all();
+    const stocks = query.results || [];
     
     let successCount = 0;
-    for (const stock of stocksToAnalyze) {
-      try {
-        const aiResult = await this.analyzeWithGemini(env, stock);
-        
-        await env.DB.prepare(`
-          INSERT INTO AIAnalysis (scan_id, ticker, sector, catalyst, ai_stage, heat, strategy_tag)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        `).bind(stock.id, stock.ticker, aiResult.sector, aiResult.catalyst, aiResult.stage, aiResult.heat, aiResult.strategy).run();
+    for (const stock of stocks) {
+      // 💡 這裡不使用 try/catch，讓錯誤直接拋到 fetch 層顯示出來
+      const aiResult = await this.analyzeWithGemini(env, stock);
+      
+      await env.DB.prepare(`INSERT INTO AIAnalysis (scan_id, ticker, sector, catalyst, ai_stage, heat, strategy_tag) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .bind(stock.id, stock.ticker, aiResult.sector, aiResult.catalyst, aiResult.stage, aiResult.heat, aiResult.strategy).run();
 
-        await env.DB.prepare("UPDATE RawScans SET is_analyzed = 1 WHERE id = ?").bind(stock.id).run();
-        successCount++;
-        await new Promise(r => setTimeout(r, 1200)); 
-      } catch (e) {
-        console.error(`${stock.ticker} 失敗: ${e.message}`);
-        await env.DB.prepare("UPDATE RawScans SET is_analyzed = -1 WHERE id = ?").bind(stock.id).run();
-      }
+      await env.DB.prepare("UPDATE RawScans SET is_analyzed = 1 WHERE id = ?").bind(stock.id).run();
+      successCount++;
+      await new Promise(r => setTimeout(r, 1000));
     }
     return successCount;
   },
 
-async analyzeWithGemini(env, stock) {
-    // 修正：使用最標準的 v1 穩定端點
+  async analyzeWithGemini(env, stock) {
     const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
     
-    // 增加：強迫 AI 去搜尋 2026 年最新資訊
-    const prompt = `Current Date: 2026-02-25. Analyze US stock ${stock.ticker}. 
-    Search for the latest catalysts and news in February 2026.
-    Return ONLY JSON: {"sector":"板塊","catalyst":"2026最新利多","stage":"2","heat":5,"strategy":"建議"}`;
-
     const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { 
-          temperature: 0.2, // 稍微提高隨機性以獲取最新觀點
-          response_mime_type: "application/json" 
-        }
+        contents: [{ parts: [{ text: `Analyze US stock ${stock.ticker} for Feb 2026. Return JSON only: {"sector":"","catalyst":"","stage":"","heat":5,"strategy":""}` }] }],
+        generationConfig: { response_mime_type: "application/json" }
       })
     });
 
     if (!response.ok) {
-      const errorDetail = await response.text();
-      // 💡 這裡會告訴我們到底是 403 (Key不對) 還是 429 (太頻繁)
-      throw new Error(`Google API 拒絕請求: ${response.status} - ${errorDetail}`);
+      const errBody = await response.text();
+      // 🚀 將 Google 的原始報錯拋出
+      throw new Error(`Google API 報錯 (${response.status}): ${errBody}`);
     }
 
     const data = await response.json();
-    const rawText = data.candidates[0].content.parts[0].text;
-    return JSON.parse(rawText.match(/\{[\s\S]*\}/)[0]);
+    return JSON.parse(data.candidates[0].content.parts[0].text);
   },
 
   async sendFinalReport(env, today) {
-    // 💡 修正 3：只要是當前分析完 (1) 的就發送
-    const report = await env.DB.prepare(`
-      SELECT * FROM AIAnalysis 
-      WHERE scan_id IN (SELECT id FROM RawScans WHERE is_analyzed = 1)
-    `).all();
-
+    const report = await env.DB.prepare(`SELECT * FROM AIAnalysis WHERE scan_id IN (SELECT id FROM RawScans WHERE is_analyzed = 1)`).all();
     const results = report.results || [];
     if (results.length === 0) return "⚠️ 資料庫中無分析結果可報告";
 
     let msg = `🔥【美股實戰戰報】\n\n`;
-    results.forEach(p => {
-      msg += `📂 ${p.sector} | **${p.ticker}**\n* 🌡️ 熱度: ${p.heat}🔥\n* 📰 ${p.catalyst}\n\n`;
-    });
+    results.forEach(p => { msg += `📂 ${p.sector} | **${p.ticker}**\n* 🌡️ 熱度: ${p.heat}🔥\n* 📰 ${p.catalyst}\n\n`; });
 
     await fetch(`https://api.telegram.org/bot${env.TG_BOT_TOKEN}/sendMessage`, {
       method: "POST",
@@ -141,7 +113,6 @@ async analyzeWithGemini(env, stock) {
       body: JSON.stringify({ chat_id: env.TG_CHAT_ID, text: msg })
     });
 
-    // 發送後標記為 2，避免重複
     await env.DB.prepare("UPDATE RawScans SET is_analyzed = 2 WHERE is_analyzed = 1").run();
     return "✅ Telegram 報告發送完成";
   }

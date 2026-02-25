@@ -1,180 +1,163 @@
-export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    const action = url.searchParams.get("action");
-    // 設定台灣時區日期
-    const today = new Date(new Date().getTime() + 8 * 3600 * 1000).toISOString().split('T')[0];
+// 【美股專屬】實戰交易決策與量化資料庫寫入機器人
+async function generateTradingReport(env) {
+  try {
+    const isUS = true; // 切換為美股
+    const marketStr = isUS ? "US" : "TW";
+    const today = new Date().toISOString().split('T')[0];
 
-    if (action === "run") {
-      let debugLog = `📅 執行日期: ${today}\n`;
-      try {
-        // 1. 從 TradingView 抓取資料
-        const count = await this.ingestStocks(env, today);
-        debugLog += `✅ 成功入庫: ${count} 檔\n`;
-
-        // 2. 診斷剩餘標的
-        const check = await env.DB.prepare("SELECT COUNT(*) as c FROM RawScans WHERE is_analyzed = 0").first();
-        debugLog += `🔍 待處理庫存: ${check.c} 檔\n`;
-
-        // 3. 執行雙引擎分析 (每次處理 5-10 檔以防超時)
-        debugLog += "⏳ 啟動雙引擎分析 (CF AI + Gemini)...\n";
-        const analysisCount = await this.processHybridAI(env);
-        debugLog += `✅ 分析完成: ${analysisCount} 檔\n`;
-
-        // 4. 發送 Telegram 報告
-        const reportStatus = await this.sendFinalReport(env, today);
-        debugLog += `🚀 ${reportStatus}\n`;
-
-        return new Response(debugLog, { headers: { "Content-Type": "text/plain; charset=UTF-8" } });
-      } catch (err) {
-        return new Response(`❌ 致命錯誤:\n${err.message}`, { status: 500 });
-      }
-    }
-    return new Response("請使用 ?action=run 啟動機器人");
-  },
-
-  // 1. 資料入庫模組
-  async ingestStocks(env, today) {
-    const tvUrl = "https://scanner.tradingview.com/america/scan";
+    // 1. 呼叫 TradingView API (美股強勢股濾網：市值>100億美元、均量>200萬股、週漲幅>15%)
+    // 注意：美股需使用 global/scan 且必須帶上 User-Agent 避免 403 錯誤
+    const tvUrl = "https://scanner.tradingview.com/global/scan";
     const tvPayload = {
       filter: [
-        { left: "close", operation: "greater", right: 10 },
-        { left: "Perf.1M", operation: "greater", right: 15 },
-        { left: "market_cap_basic", operation: "greater", right: 2000000000 }
+        { left: "Perf.M", operation: "greater", right: 20 },
+        { left: "market_cap_basic", operation: "greater", right: 10000000000 },
+        { left: "average_volume_30d_calc", operation: "greater", right: 2000000 }
       ],
+      options: { lang: "zh_TW" },
       markets: ["america"],
-      columns: ["name", "description", "close", "SMA20", "SMA50", "SMA200"],
-      sort: { sortBy: "Perf.1M", sortOrder: "desc" },
-      range: [0, 15]
+      symbols: { query: { types: ["stock"] }, tickers: [] },
+      columns: ["name", "description", "close", "SMA20", "SMA50", "SMA200"], 
+      sort: { sortBy: "Perf.W", sortOrder: "desc" },
+      range: [0, 50] // 美股數量較多，先抓前 50 檔最強的進入 AI 分析
     };
 
-    const response = await fetch(tvUrl, { method: "POST", body: JSON.stringify(tvPayload) });
-    const tvData = await response.json();
+    const tvResponse = await fetch(tvUrl, {
+      method: "POST",
+      headers: { 
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Referer": "https://www.tradingview.com/"
+      },
+      body: JSON.stringify(tvPayload)
+    });
+
+    if (!tvResponse.ok) {
+      const errorMsg = await tvResponse.text();
+      return `⚠️ TradingView 美股 API 請求失敗 (狀態碼: ${tvResponse.status})`;
+    }
+    
+    const tvData = await tvResponse.json();
     const stocks = tvData.data || [];
 
-    if (stocks.length > 0) {
-      const stmt = env.DB.prepare(`
-        INSERT OR IGNORE INTO RawScans (scan_date, ticker, company_name, close_price, sma_20, sma_50, sma_200, is_analyzed)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 0)
-      `);
-      const batch = stocks.map(s => stmt.bind(today, s.d[0], s.d[1], s.d[2], s.d[3], s.d[4], s.d[5]));
-      await env.DB.batch(batch);
-    }
-    return stocks.length;
-  },
+    if (stocks.length === 0) return "目前沒有符合條件（週漲幅>15%、市值>100億美元、均量>200萬股）的美股標的。";
 
-  // 2. 雙引擎分析核心
-  async processHybridAI(env) {
-    if (!env.AI) throw new Error("環境錯誤：找不到 env.AI 繫結");
-    
-    const query = await env.DB.prepare("SELECT * FROM RawScans WHERE is_analyzed = 0 LIMIT 5").all();
-    const stocks = query.results || [];
-    let successCount = 0;
+    // 2. 格式化資料
+    let rawStockData = {};
+    let allStocksList = [];
 
-    for (const stock of stocks) {
-      try {
-        let finalAnalysis = { sector: "未知", catalyst: "分析中", heat: 3, strategy: "觀望" };
+    stocks.forEach(item => {
+      const [name, description, close, sma20, sma50, sma200] = item.d;
+      const c = close ? close.toFixed(2) : 0;
+      const m20 = sma20 ? sma20.toFixed(2) : 0;
+      const m50 = sma50 ? sma50.toFixed(2) : 0;
+      const m200 = sma200 ? sma200.toFixed(2) : 0;
 
-        // --- 引擎 A: Cloudflare Workers AI (負責板塊識別) ---
-        try {
-          const cfRes = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
-            messages: [{ role: 'user', content: `Which stock sector does ${stock.ticker} belong to? Return only the sector name.` }]
-          });
-          finalAnalysis.sector = cfRes.response.replace(/[^a-zA-Z ]/g, "").trim();
-        } catch (e) { console.error("CF AI 失敗，使用預設板塊"); }
-
-        // --- 引擎 B: Gemini API (負責 2026 年最新聯網新聞) ---
-// --- 引擎 B: Gemini API (強化聯網搜尋版) ---
-// --- 引擎 B: Gemini API (正式開啟聯網搜尋) ---
-        try {
-          const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
-          
-          const gRes = await fetch(geminiUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              contents: [{ 
-                parts: [{ 
-                  text: `Analyze US stock ${stock.ticker} for February 26, 2026. 
-                  Search for current market news, earnings, or analyst ratings. 
-                  Return ONLY JSON format: {"catalyst":"(中文摘要)","heat":5,"strategy":"(操作建議)"}` 
-                }] 
-              }],
-              // 💡 關鍵：正式開啟 Google 搜尋聯網功能
-              tools: [{ google_search_retrieval: {} }],
-              generationConfig: {
-                temperature: 0.5, // 稍微提高隨機性以獲取更多新聞細節
-              }
-            })
-          });
-
-          const gData = await gRes.json();
-          
-          // 檢查回傳結構
-          if (gData.candidates && gData.candidates[0].content) {
-            const gText = gData.candidates[0].content.parts[0].text;
-            // 過濾掉可能存在的 Markdown 標籤 (如 ```json)
-            const jsonMatch = gText.match(/\{[\s\S]*\}/);
-            if (jsonMatch) {
-              const gJson = JSON.parse(jsonMatch[0]);
-              finalAnalysis.catalyst = gJson.catalyst || "查無具體新聞";
-              finalAnalysis.heat = gJson.heat || 3;
-              finalAnalysis.strategy = gJson.strategy || "觀望";
-            }
-          } else if (gData.error) {
-            // 如果 API 報錯，顯示錯誤碼以便診斷
-            finalAnalysis.catalyst = `Gemini API 錯誤: ${gData.error.message}`;
-          }
-        } catch (e) {
-          finalAnalysis.catalyst = `搜尋過程發生異常: ${e.message}`;
-        }
-
-        // --- 存入資料庫 ---
-        await env.DB.prepare(`
-          INSERT INTO AIAnalysis (scan_id, ticker, sector, catalyst, ai_stage, heat, strategy_tag)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        `).bind(stock.id, stock.ticker, finalAnalysis.sector, finalAnalysis.catalyst, "2", finalAnalysis.heat, finalAnalysis.strategy).run();
-
-        await env.DB.prepare("UPDATE RawScans SET is_analyzed = 1 WHERE id = ?").bind(stock.id).run();
-        successCount++;
-        
-      } catch (e) {
-        console.error(`${stock.ticker} 分析失敗:`, e.message);
-        await env.DB.prepare("UPDATE RawScans SET is_analyzed = -1 WHERE id = ?").bind(stock.id).run();
-      }
-    }
-    return successCount;
-  },
-
-  // 3. 報告發送模組
-  async sendFinalReport(env, today) {
-    const report = await env.DB.prepare(`
-      SELECT * FROM AIAnalysis 
-      WHERE scan_id IN (SELECT id FROM RawScans WHERE is_analyzed = 1)
-      ORDER BY heat DESC
-    `).all();
-
-    const results = report.results || [];
-    if (results.length === 0) return "⚠️ 資料庫中暫無分析成功的標的可發送";
-
-    let msg = `🚀【美股混合 AI 實戰戰報】\n📅 日期: ${today}\n\n`;
-    results.forEach(p => {
-      msg += `📂 **${p.sector}** | \`$${p.ticker}\`\n`;
-      msg += `🌡️ 熱度: ${"🔥".repeat(p.heat)} | 💡 ${p.strategy_tag}\n`;
-      msg += `📰 ${p.catalyst}\n\n`;
+      rawStockData[name] = { close: c, sma20: m20, sma50: m50, sma200: m200 };
+      allStocksList.push(`[${name}] ${description} (收盤:$${c} | 20MA:$${m20} | 50MA:$${m50} | 200MA:$${m200})`);
     });
-    msg += `✅ 以上為 AI 自動生成的即時分析，僅供參考。`;
 
-    const tgRes = await fetch(`https://api.telegram.org/bot${env.TG_BOT_TOKEN}/sendMessage`, {
+    // 3. 呼叫 Gemini API
+    const prompt = `
+      以下為本週符合強勢濾網的【美股】名單與實際均線數據（共 ${stocks.length} 檔）：
+      【${allStocksList.join("、")}】
+
+      請以「頂級美股趨勢交易者」角度分析。重心轉向「主流回測量縮」與「低位階補漲」。
+      請直接輸出：
+
+      【一】美股強勢股實戰策略
+      ### 📂 [板塊名稱] (主流核心/次主流/非主流)
+      🔹 **[代號] 公司名稱** (題材簡述)
+      * 🌡️ **熱度**：[1~5顆🔥]
+      * 📈 **位階**：Stage [1~4] ｜ 乖離風險：[高/中/低]
+      * ⚔️ **策略**：**【建議標籤】** (⚠️ 限填: 拉回量縮承接 / 低檔試單 / 僅觀察 / 高檔風險)
+
+      【二】潛力擴散與低位階補漲族群推演
+      (對應板塊推演出 2 個外溢次產業)
+
+      【三】資料庫寫入專用 JSON
+      \`\`\`json
+      [
+        { "ticker": "NVDA", "company": "NVIDIA", "sector": "AI晶片", "ai_stage": "Stage 2", "strategy": "高檔風險" }
+      ]
+      \`\`\`
+    `;
+
+    // 統一使用目前最穩定的 1.5-flash
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
+    const aiResponse = await fetch(geminiUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: env.TG_CHAT_ID, text: msg, parse_mode: "Markdown" })
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        systemInstruction: {
+          parts: [{ text: "你是一位實戰派的美股趨勢交易員。極度厭惡追高。操作紀律是：只做核心主流的回測量縮。" }]
+        }
+      })
     });
 
-    if (tgRes.ok) {
-      await env.DB.prepare("UPDATE RawScans SET is_analyzed = 2 WHERE is_analyzed = 1").run();
-      return "Telegram 報告發送成功";
+    const aiData = await aiResponse.json();
+    const rawAnalysis = aiData?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+
+    if (!rawAnalysis) return "⚠️ AI 回應異常";
+
+    // 4. 解析 JSON 與清理畫面
+    let reportForTelegram = rawAnalysis;
+    let dbJsonArray = [];
+    const jsonMatch = rawAnalysis.match(/```json\n([\s\S]*?)\n```/);
+    if (jsonMatch) {
+      try {
+        dbJsonArray = JSON.parse(jsonMatch[1]);
+        reportForTelegram = rawAnalysis.split(/【三】/)[0].trim();
+      } catch(e) { console.error("JSON 解析失敗", e); }
     }
-    return "Telegram 發送失敗";
+
+    // 5. 寫入 D1 資料庫
+    if (env.DB && dbJsonArray.length > 0) {
+      const stmt = env.DB.prepare(`
+        INSERT INTO DailyStockAnalysis (scan_date, market, ticker, company_name, close_price, sma_20, sma_50, sma_200, sector, ai_stage, strategy_tag) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      
+      let batchStmts = [];
+      for (let item of dbJsonArray) {
+        const t = item.ticker || "UNKNOWN";
+        const tvData = rawStockData[t] || { close: 0, sma20: 0, sma50: 0, sma200: 0 };
+        batchStmts.push(stmt.bind(
+          today, marketStr, t, item.company || "UNKNOWN", 
+          Number(tvData.close), Number(tvData.sma20), Number(tvData.sma50), Number(tvData.sma200),
+          item.sector || "N/A", item.ai_stage || "N/A", item.strategy || "N/A"
+        ));
+      }
+      await env.DB.batch(batchStmts);
+    }
+
+    return `🇺🇸【美股實戰交易決策】🇺🇸\n✅ 已完成 ${stocks.length} 檔數據分析並存入 D1。\n\n====================\n${reportForTelegram}`;
+
+  } catch (error) {
+    return `執行發生嚴重錯誤: ${error.message}`;
+  }
+}
+
+// 發送訊息至 Telegram
+async function sendToTelegram(message, env) {
+  if (!env.TG_BOT_TOKEN || !env.TG_CHAT_ID) return;
+  const tgUrl = `https://api.telegram.org/bot${env.TG_BOT_TOKEN}/sendMessage`;
+  await fetch(tgUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: env.TG_CHAT_ID, text: message, parse_mode: "Markdown" })
+  });
+}
+
+export default {
+  async fetch(request, env, ctx) {
+    const report = await generateTradingReport(env);
+    ctx.waitUntil(sendToTelegram(report, env));
+    return new Response(report, { headers: { "Content-Type": "text/plain;charset=UTF-8" } });
+  },
+  async scheduled(event, env, ctx) {
+    const report = await generateTradingReport(env);
+    await sendToTelegram(report, env);
   }
 };

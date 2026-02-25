@@ -54,38 +54,41 @@ export default {
   },
 
 async processWithCFAI(env) {
-    // 💡 1. 確保抓得到資料
+    // 💡 診斷：檢查 AI 物件是否存在
+    if (!env.AI) {
+      throw new Error("❌ [系統錯誤] env.AI 未定義。請確認：1. Binding 名稱叫 AI 2. 已重新按下 Save and Deploy。");
+    }
+
     const query = await env.DB.prepare("SELECT * FROM RawScans WHERE is_analyzed = 0 LIMIT 5").all();
     const stocks = query.results || [];
-    
     if (stocks.length === 0) return 0;
 
     let successCount = 0;
     for (const stock of stocks) {
-      // 💡 2. 移除 try...catch，讓錯誤直接噴出來
-      console.log(`正在分析: ${stock.ticker}`);
-      
-      const aiResponse = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
-        messages: [
-          { role: 'system', content: 'You are a stock analyst. Reply in JSON.' },
-          { role: 'user', content: `Analyze ${stock.ticker}. Return JSON: {"sector":"Tech","catalyst":"Growth","heat":5,"strategy":"Buy"}` }
-        ]
-      });
+      try {
+        // 使用更穩定的模型名稱
+        const aiResponse = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
+          messages: [
+            { role: 'system', content: 'You are a stock analyst. Reply only in valid JSON.' },
+            { role: 'user', content: `Analyze ticker ${stock.ticker}. Return JSON: {"sector":"...","catalyst":"...","heat":5,"strategy":"..."}` }
+          ]
+        });
 
-      // 💡 3. 處理 Cloudflare AI 可能的不同回傳格式
-      const rawText = aiResponse.response || aiResponse; 
-      if (!rawText) throw new Error("AI 回傳為空，請檢查 AI Binding 是否正確");
+        const rawText = aiResponse.response || aiResponse; 
+        const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) continue;
+        
+        const aiResult = JSON.parse(jsonMatch[0]);
 
-      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) throw new Error(`AI 回傳格式非 JSON: ${rawText.substring(0,100)}`);
-      
-      const aiResult = JSON.parse(jsonMatch[0]);
+        await env.DB.prepare(`INSERT INTO AIAnalysis (scan_id, ticker, sector, catalyst, ai_stage, heat, strategy_tag) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+          .bind(stock.id, stock.ticker, aiResult.sector || "Tech", aiResult.catalyst || "N/A", "2", aiResult.heat || 3, aiResult.strategy || "Watch").run();
 
-      await env.DB.prepare(`INSERT INTO AIAnalysis (scan_id, ticker, sector, catalyst, ai_stage, heat, strategy_tag) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-        .bind(stock.id, stock.ticker, aiResult.sector || "Unknown", aiResult.catalyst || "N/A", "2", aiResult.heat || 3, aiResult.strategy || "Watch").run();
-
-      await env.DB.prepare("UPDATE RawScans SET is_analyzed = 1 WHERE id = ?").bind(stock.id).run();
-      successCount++;
+        await env.DB.prepare("UPDATE RawScans SET is_analyzed = 1 WHERE id = ?").bind(stock.id).run();
+        successCount++;
+      } catch (e) {
+        // 如果單檔分析失敗，跳過並標記失敗，不卡住後面的 450 檔
+        await env.DB.prepare("UPDATE RawScans SET is_analyzed = -1 WHERE id = ?").bind(stock.id).run();
+      }
     }
     return successCount;
   },

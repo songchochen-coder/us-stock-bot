@@ -88,20 +88,33 @@ export default {
     return successCount;
   },
 
-  async analyzeWithGemini(env, stock) {
-    // 💡 修正 2：改用 v1 穩定端點
+async analyzeWithGemini(env, stock) {
+    // 修正：使用最標準的 v1 穩定端點
     const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
     
+    // 增加：強迫 AI 去搜尋 2026 年最新資訊
+    const prompt = `Current Date: 2026-02-25. Analyze US stock ${stock.ticker}. 
+    Search for the latest catalysts and news in February 2026.
+    Return ONLY JSON: {"sector":"板塊","catalyst":"2026最新利多","stage":"2","heat":5,"strategy":"建議"}`;
+
     const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: `分析美股代號 ${stock.ticker}。股價:${stock.close_price}。請搜尋催化劑。僅回傳純 JSON: {"sector": "板塊", "catalyst": "原因", "stage": "2", "heat": 5, "strategy": "標籤"}` }] }],
-        generationConfig: { response_mime_type: "application/json" }
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { 
+          temperature: 0.2, // 稍微提高隨機性以獲取最新觀點
+          response_mime_type: "application/json" 
+        }
       })
     });
 
-    if (!response.ok) throw new Error(`API 報錯: ${response.status}`);
+    if (!response.ok) {
+      const errorDetail = await response.text();
+      // 💡 這裡會告訴我們到底是 403 (Key不對) 還是 429 (太頻繁)
+      throw new Error(`Google API 拒絕請求: ${response.status} - ${errorDetail}`);
+    }
+
     const data = await response.json();
     const rawText = data.candidates[0].content.parts[0].text;
     return JSON.parse(rawText.match(/\{[\s\S]*\}/)[0]);

@@ -16,3 +16,9 @@ database_id = "e03241f2-4264-4346-91c0-47bbea0bacf9"
 [observability.logs]
 enabled = false
 invocation_logs = true
+
+{
+  "ai": {
+    "binding": "AI" // i.e. available in your Worker on env.AI
+  }
+}

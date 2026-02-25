@@ -78,8 +78,8 @@ export default {
   },
 
 async analyzeWithGemini(env, stock) {
-    // 💡 關鍵修正：切換回 v1beta 並確保 URL 格式完全符合規範
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
+    // 💡 嘗試使用最通用的 v1beta 路徑，並改用 gemini-1.5-flash-latest
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${env.GEMINI_API_KEY}`;
     
     const response = await fetch(url, {
       method: "POST",
@@ -87,36 +87,24 @@ async analyzeWithGemini(env, stock) {
       body: JSON.stringify({
         contents: [{ 
           parts: [{ 
-            text: `Analyze US stock ${stock.ticker}. Today is Feb 26, 2026. 
-            Search for recent catalysts. 
-            Return ONLY a JSON object: 
-            {"sector":"Industry","catalyst":"News","stage":"2","heat":5,"strategy":"Action"}` 
+            text: `Analyze US stock ${stock.ticker}. Date: Feb 2026. 
+            Return ONLY JSON: {"sector":"...","catalyst":"...","stage":"2","heat":5,"strategy":"..."}` 
           }] 
-        }],
-        // 💡 移除 generationConfig 以避免任何欄位不匹配的風險
+        }]
       })
     });
 
     if (!response.ok) {
       const errBody = await response.text();
+      // 如果 flash-latest 還是 404，這裡會提供最後的線索
       throw new Error(`Google API 報錯 (${response.status}): ${errBody}`);
     }
 
     const data = await response.json();
-    
-    if (!data.candidates || !data.candidates[0].content) {
-      throw new Error("AI 回傳結構異常，可能受到地區或內容安全過濾限制");
-    }
-
     const rawText = data.candidates[0].content.parts[0].text;
-    
-    // 從文字中提取 JSON
     const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("AI 輸出的文字中找不到 JSON 物件");
-    
     return JSON.parse(jsonMatch[0]);
   },
-
   async sendFinalReport(env, today) {
     const report = await env.DB.prepare(`SELECT * FROM AIAnalysis WHERE scan_id IN (SELECT id FROM RawScans WHERE is_analyzed = 1)`).all();
     const results = report.results || [];

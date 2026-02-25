@@ -85,45 +85,49 @@ export default {
 
         // --- 引擎 B: Gemini API (負責 2026 年最新聯網新聞) ---
 // --- 引擎 B: Gemini API (強化聯網搜尋版) ---
-try {
-  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
-  
-  const gRes = await fetch(geminiUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ 
-        parts: [{ 
-          // 💡 關鍵：明確要求搜尋最新新聞，並給出精確日期
-          text: `Search for the very latest stock market news and financial catalysts for ${stock.ticker} on Feb 26, 2026. 
-          If there is no news today, look for the most recent events in February 2026.
-          Return ONLY JSON: {"catalyst":"簡短中文新聞摘要","heat":5,"strategy":"操作建議"}` 
-        }] 
-      }],
-      // 💡 加入安全設定，避免因為財經預測被過濾
-      safetySettings: [
-        { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
-        { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
-        { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
-        { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
-      ]
-    })
-  });
+// --- 引擎 B: Gemini API (正式開啟聯網搜尋) ---
+        try {
+          const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
+          
+          const gRes = await fetch(geminiUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{ 
+                parts: [{ 
+                  text: `Analyze US stock ${stock.ticker} for February 26, 2026. 
+                  Search for current market news, earnings, or analyst ratings. 
+                  Return ONLY JSON format: {"catalyst":"(中文摘要)","heat":5,"strategy":"(操作建議)"}` 
+                }] 
+              }],
+              // 💡 關鍵：正式開啟 Google 搜尋聯網功能
+              tools: [{ google_search_retrieval: {} }],
+              generationConfig: {
+                temperature: 0.5, // 稍微提高隨機性以獲取更多新聞細節
+              }
+            })
+          });
 
-  if (gRes.ok) {
-    const gData = await gRes.json();
-    // 檢查是否有回傳內容
-    if (gData.candidates && gData.candidates[0].content) {
-      const gText = gData.candidates[0].content.parts[0].text;
-      const gJson = JSON.parse(gText.match(/\{[\s\S]*\}/)[0]);
-      finalAnalysis.catalyst = gJson.catalyst;
-      finalAnalysis.heat = gJson.heat;
-      finalAnalysis.strategy = gJson.strategy;
-    }
-  }
-} catch (e) {
-  finalAnalysis.catalyst = "Gemini 聯網搜尋暫時受阻，請檢查 API 權限。";
-}
+          const gData = await gRes.json();
+          
+          // 檢查回傳結構
+          if (gData.candidates && gData.candidates[0].content) {
+            const gText = gData.candidates[0].content.parts[0].text;
+            // 過濾掉可能存在的 Markdown 標籤 (如 ```json)
+            const jsonMatch = gText.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+              const gJson = JSON.parse(jsonMatch[0]);
+              finalAnalysis.catalyst = gJson.catalyst || "查無具體新聞";
+              finalAnalysis.heat = gJson.heat || 3;
+              finalAnalysis.strategy = gJson.strategy || "觀望";
+            }
+          } else if (gData.error) {
+            // 如果 API 報錯，顯示錯誤碼以便診斷
+            finalAnalysis.catalyst = `Gemini API 錯誤: ${gData.error.message}`;
+          }
+        } catch (e) {
+          finalAnalysis.catalyst = `搜尋過程發生異常: ${e.message}`;
+        }
 
         // --- 存入資料庫 ---
         await env.DB.prepare(`

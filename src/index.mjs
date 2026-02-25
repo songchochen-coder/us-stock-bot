@@ -53,34 +53,39 @@ export default {
     return stocks.length;
   },
 
-  async processWithCFAI(env) {
-    // 每次處理 5 檔，避免超時
+async processWithCFAI(env) {
+    // 💡 1. 確保抓得到資料
     const query = await env.DB.prepare("SELECT * FROM RawScans WHERE is_analyzed = 0 LIMIT 5").all();
     const stocks = query.results || [];
+    
+    if (stocks.length === 0) return 0;
+
     let successCount = 0;
-
     for (const stock of stocks) {
-      try {
-        // 使用 Cloudflare 內建 Llama 模型
-        const response = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
-          messages: [
-            { role: 'system', content: 'You are a stock analyst. Reply only in JSON.' },
-            { role: 'user', content: `Analyze ticker ${stock.ticker} (Price: ${stock.close_price}). Provide sector, a catalyst, heat (1-5), and strategy. Format: {"sector":"","catalyst":"","heat":5,"strategy":""}` }
-          ]
-        });
+      // 💡 2. 移除 try...catch，讓錯誤直接噴出來
+      console.log(`正在分析: ${stock.ticker}`);
+      
+      const aiResponse = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
+        messages: [
+          { role: 'system', content: 'You are a stock analyst. Reply in JSON.' },
+          { role: 'user', content: `Analyze ${stock.ticker}. Return JSON: {"sector":"Tech","catalyst":"Growth","heat":5,"strategy":"Buy"}` }
+        ]
+      });
 
-        const rawText = response.response || response;
-        const aiResult = JSON.parse(rawText.match(/\{[\s\S]*\}/)[0]);
+      // 💡 3. 處理 Cloudflare AI 可能的不同回傳格式
+      const rawText = aiResponse.response || aiResponse; 
+      if (!rawText) throw new Error("AI 回傳為空，請檢查 AI Binding 是否正確");
 
-        await env.DB.prepare(`INSERT INTO AIAnalysis (scan_id, ticker, sector, catalyst, ai_stage, heat, strategy_tag) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-          .bind(stock.id, stock.ticker, aiResult.sector, aiResult.catalyst, "2", aiResult.heat, aiResult.strategy).run();
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error(`AI 回傳格式非 JSON: ${rawText.substring(0,100)}`);
+      
+      const aiResult = JSON.parse(jsonMatch[0]);
 
-        await env.DB.prepare("UPDATE RawScans SET is_analyzed = 1 WHERE id = ?").bind(stock.id).run();
-        successCount++;
-      } catch (e) {
-        console.error(`Error analyzing ${stock.ticker}: ${e.message}`);
-        await env.DB.prepare("UPDATE RawScans SET is_analyzed = -1 WHERE id = ?").bind(stock.id).run();
-      }
+      await env.DB.prepare(`INSERT INTO AIAnalysis (scan_id, ticker, sector, catalyst, ai_stage, heat, strategy_tag) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .bind(stock.id, stock.ticker, aiResult.sector || "Unknown", aiResult.catalyst || "N/A", "2", aiResult.heat || 3, aiResult.strategy || "Watch").run();
+
+      await env.DB.prepare("UPDATE RawScans SET is_analyzed = 1 WHERE id = ?").bind(stock.id).run();
+      successCount++;
     }
     return successCount;
   },

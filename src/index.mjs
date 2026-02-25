@@ -84,29 +84,46 @@ export default {
         } catch (e) { console.error("CF AI 失敗，使用預設板塊"); }
 
         // --- 引擎 B: Gemini API (負責 2026 年最新聯網新聞) ---
-        try {
-          const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
-          const gRes = await fetch(geminiUrl, {
-            method: "POST",
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: `Today is Feb 26, 2026. Search for latest news/catalysts for stock ${stock.ticker}. Return ONLY JSON: {"catalyst":"2026最新利多","heat":5,"strategy":"建議"}` }] }]
-            })
-          });
+// --- 引擎 B: Gemini API (強化聯網搜尋版) ---
+try {
+  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
+  
+  const gRes = await fetch(geminiUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ 
+        parts: [{ 
+          // 💡 關鍵：明確要求搜尋最新新聞，並給出精確日期
+          text: `Search for the very latest stock market news and financial catalysts for ${stock.ticker} on Feb 26, 2026. 
+          If there is no news today, look for the most recent events in February 2026.
+          Return ONLY JSON: {"catalyst":"簡短中文新聞摘要","heat":5,"strategy":"操作建議"}` 
+        }] 
+      }],
+      // 💡 加入安全設定，避免因為財經預測被過濾
+      safetySettings: [
+        { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+        { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+        { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+        { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
+      ]
+    })
+  });
 
-          if (gRes.ok) {
-            const gData = await gRes.json();
-            const gText = gData.candidates[0].content.parts[0].text;
-            const gJson = JSON.parse(gText.match(/\{[\s\S]*\}/)[0]);
-            finalAnalysis.catalyst = gJson.catalyst;
-            finalAnalysis.heat = gJson.heat;
-            finalAnalysis.strategy = gJson.strategy;
-          } else {
-            throw new Error("Gemini API 回傳錯誤");
-          }
-        } catch (e) {
-          // Gemini 失敗時的回退方案：使用 Workers AI 生成通用分析
-          finalAnalysis.catalyst = "暫無 2026 即時新聞，技術面強勢多頭。";
-        }
+  if (gRes.ok) {
+    const gData = await gRes.json();
+    // 檢查是否有回傳內容
+    if (gData.candidates && gData.candidates[0].content) {
+      const gText = gData.candidates[0].content.parts[0].text;
+      const gJson = JSON.parse(gText.match(/\{[\s\S]*\}/)[0]);
+      finalAnalysis.catalyst = gJson.catalyst;
+      finalAnalysis.heat = gJson.heat;
+      finalAnalysis.strategy = gJson.strategy;
+    }
+  }
+} catch (e) {
+  finalAnalysis.catalyst = "Gemini 聯網搜尋暫時受阻，請檢查 API 權限。";
+}
 
         // --- 存入資料庫 ---
         await env.DB.prepare(`
